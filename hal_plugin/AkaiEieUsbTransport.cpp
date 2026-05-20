@@ -24,6 +24,7 @@ namespace akai_eie_hal
 		constexpr std::uint32_t kSampleRateHz = 48000;
 		constexpr std::size_t kOutputRingFrameCount = kSampleRateHz / 2;
 		constexpr std::size_t kOutputPrimeFrameCount = kSampleRateHz / 20;
+		constexpr std::size_t kOutputReprimeFrameCount = kSampleRateHz / 100;
 		constexpr std::size_t kOutputLowWaterFrameCount = kSampleRateHz / 40;
 		constexpr std::size_t kOutputHighWaterFrameCount = kSampleRateHz / 5;
 		constexpr std::size_t kPlaybackTransferCount = 4;
@@ -1034,35 +1035,19 @@ namespace akai_eie_hal
 		{
 			std::lock_guard<std::mutex> lock(impl_->outputMutex);
 
-			// --------------------------------------------------------------
-			// FIX: Underrun recovery – reset and allow immediate re-prime
-			// --------------------------------------------------------------
-			if (!impl_->outputPrimed || impl_->outputFrameCount < frameCount)
+			if (!impl_->outputPrimed
+				&& impl_->outputFrameCount >= kOutputReprimeFrameCount)
 			{
-				if (impl_->outputFrameCount < frameCount)
+				impl_->outputPrimed = true;
+				++impl_->rebufferCount;
+				if (impl_->rebufferCount <= 5)
 				{
-					++impl_->underrunCount;
-					if (impl_->underrunCount <= 5)
-					{
-						os_log(OS_LOG_DEFAULT,
-							   "AKAI EIE Pro USB: underrun (have %zu, need %zu) – resetting ring",
-							   impl_->outputFrameCount, frameCount);
-					}
-					// Discard stale data and re‑arm priming
-					impl_->outputReadFrame = impl_->outputWriteFrame;
-					impl_->outputFrameCount = 0;
-					impl_->outputPrimed = false;
-				}
-				// If we are not primed but have any data, re‑prime immediately
-				if (!impl_->outputPrimed && impl_->outputFrameCount > 0)
-				{
-					impl_->outputPrimed = true;
-					os_log(OS_LOG_DEFAULT, "AKAI EIE Pro USB: playback re‑primed with %zu frames",
+					os_log(OS_LOG_DEFAULT,
+						   "AKAI EIE Pro USB: playback re-primed %{public}zu frames",
 						   impl_->outputFrameCount);
 				}
 			}
 
-			// Copy as many frames as possible (now that we may have just re‑primed)
 			while (impl_->outputPrimed && copied < frameCount && impl_->outputFrameCount > 0)
 			{
 				const std::size_t contiguousAvailable =
@@ -1082,6 +1067,12 @@ namespace akai_eie_hal
 					(impl_->outputReadFrame + framesToCopy) % kOutputRingFrameCount;
 				impl_->outputFrameCount -= framesToCopy;
 				copied += framesToCopy;
+			}
+
+			if (impl_->outputPrimed && copied < frameCount
+				&& impl_->outputFrameCount == 0)
+			{
+				impl_->outputPrimed = false;
 			}
 		}
 

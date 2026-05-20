@@ -32,7 +32,7 @@ constexpr std::uint32_t kPlaybackIsoPacketCount =
 constexpr std::uint32_t kMaxPlaybackFramesPerTransfer = 480;
 constexpr std::size_t kMaxPlaybackTransferBytes =
 	kMaxPlaybackFramesPerTransfer * akai_eie::kPlaybackBytesPerFrame;
-constexpr std::uint64_t kUsbScheduleLeadBusFrames = 4;
+constexpr std::uint64_t kUsbScheduleLeadBusFrames = 8;
 
 std::uint64_t PlaybackTransferDurationBusFrames(
 	std::uint32_t frameListMicros) noexcept
@@ -399,7 +399,7 @@ void AkaiEieUsbTransport::WorkerMain() noexcept
 			+ std::chrono::seconds(1);
 		while (inFlightTransfers_.load() > 0
 			&& std::chrono::steady_clock::now() < deadline) {
-			CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.020, true);
+			CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.005, true);
 		}
 	};
 
@@ -420,7 +420,7 @@ void AkaiEieUsbTransport::WorkerMain() noexcept
 	if (open) {
 		started_.store(true);
 		while (!stopRequested_.load()) {
-			CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.050, true);
+			CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.002, true);
 		}
 
 		abortActivePipes();

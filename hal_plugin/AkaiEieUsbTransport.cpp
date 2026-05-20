@@ -904,32 +904,43 @@ namespace akai_eie_hal
 			transfer.frames[i].frActCount = 0;
 		}
 
-		std::uint64_t currentFrame = 0;
-		const bool haveCurrentFrame = ReadCurrentUsbFrame(&currentFrame);
-		if (haveCurrentFrame && impl_->nextFrameStart < currentFrame + kUsbScheduleLeadBusFrames)
-		{
-			impl_->nextFrameStart = currentFrame + kUsbScheduleLeadBusFrames;
-		}
-
-		// ---- CRITICAL FIX: Save old value before increment ----
-		const std::uint64_t oldNextFrameStart = impl_->nextFrameStart;
 		const std::uint64_t transferDurationBusFrames =
 			PlaybackTransferDurationBusFrames(impl_->frameListMicros);
-		impl_->nextFrameStart += transferDurationBusFrames;
-
-		transfer.submitted = true;
-		inFlightTransfers_.fetch_add(1);
-		const IOReturn result = (*impl_->playInterface)->WriteIsochPipeAsync(impl_->playInterface, impl_->playPipe, transfer.buffer.data(),
-																			 oldNextFrameStart, // use old start (the intended frame)
-																			 kPlaybackIsoPacketCount, transfer.frames.data(), &AkaiEieUsbTransport::PlaybackComplete, &transfer);
-		if (result != kIOReturnSuccess)
+		for (std::uint32_t attempt = 0; attempt < 2; ++attempt)
 		{
+			std::uint64_t currentFrame = 0;
+			const bool haveCurrentFrame = ReadCurrentUsbFrame(&currentFrame);
+			if (haveCurrentFrame && impl_->nextFrameStart < currentFrame + kUsbScheduleLeadBusFrames)
+			{
+				impl_->nextFrameStart = currentFrame + kUsbScheduleLeadBusFrames;
+			}
+
+			const std::uint64_t oldNextFrameStart = impl_->nextFrameStart;
+			impl_->nextFrameStart += transferDurationBusFrames;
+
+			transfer.submitted = true;
+			inFlightTransfers_.fetch_add(1);
+			const IOReturn result = (*impl_->playInterface)->WriteIsochPipeAsync(impl_->playInterface, impl_->playPipe, transfer.buffer.data(),
+																				 oldNextFrameStart,
+																				 kPlaybackIsoPacketCount, transfer.frames.data(), &AkaiEieUsbTransport::PlaybackComplete, &transfer);
+			if (result == kIOReturnSuccess)
+				return true;
+
 			transfer.submitted = false;
 			inFlightTransfers_.fetch_sub(1);
-			// ---- REVERT the advance on failure ----
 			impl_->nextFrameStart = oldNextFrameStart;
+			if (attempt == 0
+				&& (result == kIOReturnIsoTooOld
+					|| result == kIOReturnIsoTooNew))
+			{
+				if (ReadCurrentUsbFrame(&currentFrame))
+					impl_->nextFrameStart =
+						currentFrame + kUsbScheduleLeadBusFrames;
+				continue;
+			}
+
 			os_log_error(OS_LOG_DEFAULT,
-						 "AKAI EIE Pro USB: isoch write submit failed %s (%#x) start=%llu current=%llu duration=%llu frameList=%u",
+						 "AKAI EIE Pro USB: isoch write submit failed %{public}s (%{public}#x) start=%{public}llu current=%{public}llu duration=%{public}llu frameList=%{public}u",
 						 IOReturnName(result), result,
 						 static_cast<unsigned long long>(oldNextFrameStart),
 						 static_cast<unsigned long long>(haveCurrentFrame ? currentFrame : 0),
@@ -938,7 +949,7 @@ namespace akai_eie_hal
 			return false;
 		}
 
-		return true;
+		return false;
 	}
 	void AkaiEieUsbTransport::HandleSyncComplete(std::size_t transferIndex,
 												 IOReturn result) noexcept
@@ -992,8 +1003,12 @@ namespace akai_eie_hal
 						 IOReturnName(result), result);
 		}
 
-		if (!stopRequested_.load())
-			SubmitPlaybackTransfer(transferIndex);
+		if (!stopRequested_.load() && !SubmitPlaybackTransfer(transferIndex))
+		{
+			os_log_error(OS_LOG_DEFAULT,
+						 "AKAI EIE Pro USB: playback transfer %{public}zu stopped after resubmit failure",
+						 transferIndex);
+		}
 	}
 
 	bool AkaiEieUsbTransport::ReadCurrentUsbFrame(

@@ -9,7 +9,8 @@ SDKROOT ?= /Library/Developer/CommandLineTools/SDKs/MacOSX.sdk
 ARCH ?= arm64
 CXX := /usr/bin/clang++
 
-SRC := AkaiEieProHAL.cpp ../protocol/akai_eie_protocol.cpp
+SRC := AkaiEieProHAL.cpp AkaiEieUsbTransport.cpp \
+	../protocol/akai_eie_protocol.cpp
 
 CXXFLAGS := -std=c++17 -arch $(ARCH) -isysroot $(SDKROOT) \
 	-mmacosx-version-min=12.0 -fvisibility=hidden -fPIC \
@@ -17,7 +18,7 @@ CXXFLAGS := -std=c++17 -arch $(ARCH) -isysroot $(SDKROOT) \
 LDFLAGS := -bundle -arch $(ARCH) -isysroot $(SDKROOT) \
 	-mmacosx-version-min=12.0 \
 	-Wl,-exported_symbol,_AkaiEieProFactory \
-	-framework CoreAudio -framework CoreFoundation
+	-framework CoreAudio -framework CoreFoundation -framework IOKit
 
 .PHONY: all bundle sign clean install
 

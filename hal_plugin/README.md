@@ -3,21 +3,24 @@
 This is a raw `AudioServerPlugInDriverInterface` implementation. It does not
 use libASPL.
 
-The current target is a minimal silent CoreAudio device that loads without
-USB transport:
+The current target is an experimental CoreAudio HAL device with playback USB
+transport:
 
 - device name: `AKAI EIE Pro`
 - bundle ID: `com.interslice.akai-eie-pro`
 - transport: USB
 - output stream: 4-channel, 48 kHz, Float32
 - input stream: 4-channel, 48 kHz, Float32
-- `StartIO` and `StopIO`: log and succeed
+- `StartIO`: opens `09e8:0010`, selects configuration/alternate settings,
+  sends the AKAI reset sequence, and starts isochronous playback writes
+- `StopIO`: stops the USB worker and releases the device/interfaces
 - input I/O: returns silence
-- output I/O: accepts and discards samples
+- output I/O: converts interleaved Float32 to AKAI 4-channel S24_3LE wire
+  frames and queues them to the playback isochronous OUT endpoint
 
-The `protocol/` module is linked into the bundle but is not called from the
-I/O path yet. The next layer should add a transport object that feeds real USB
-capture data into the input stream and consumes output mix data for playback.
+Capture is not wired yet. The data interface is opened and the sync/capture
+pipes are detected for logging, but the HAL input stream still zero-fills until
+the bulk capture reader is added.
 
 ## Build
 

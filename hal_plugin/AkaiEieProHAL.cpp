@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <cstring>
 
+#include "AkaiEieUsbTransport.hpp"
 #include "../protocol/akai_eie_protocol.hpp"
 
 namespace {
@@ -36,6 +37,7 @@ std::atomic<UInt32> gRefCount {1};
 std::atomic<UInt32> gRunningClientCount {0};
 AudioServerPlugInHostRef gHost = nullptr;
 std::atomic<UInt64> gStartHostTime {0};
+akai_eie_hal::AkaiEieUsbTransport gUsbTransport;
 
 extern AudioServerPlugInDriverInterface *gDriverInterfacePtr;
 
@@ -80,6 +82,20 @@ bool IsInputScope(const AudioObjectPropertyAddress *address) noexcept
 bool IsOutputScope(const AudioObjectPropertyAddress *address) noexcept
 {
 	return address->mScope == kAudioObjectPropertyScopeOutput
+		|| address->mScope == kAudioObjectPropertyScopeWildcard;
+}
+
+bool IncludesInputScope(const AudioObjectPropertyAddress *address) noexcept
+{
+	return address->mScope == kAudioObjectPropertyScopeInput
+		|| address->mScope == kAudioObjectPropertyScopeGlobal
+		|| address->mScope == kAudioObjectPropertyScopeWildcard;
+}
+
+bool IncludesOutputScope(const AudioObjectPropertyAddress *address) noexcept
+{
+	return address->mScope == kAudioObjectPropertyScopeOutput
+		|| address->mScope == kAudioObjectPropertyScopeGlobal
 		|| address->mScope == kAudioObjectPropertyScopeWildcard;
 }
 
@@ -193,12 +209,12 @@ UInt32 DeviceStreamList(const AudioObjectPropertyAddress *address,
 	AudioObjectID *outObjects, UInt32 maxObjects) noexcept
 {
 	UInt32 count = 0;
-	if (IsOutputScope(address)) {
+	if (IncludesOutputScope(address)) {
 		if (outObjects != nullptr && count < maxObjects)
 			outObjects[count] = kOutputStreamObjectId;
 		++count;
 	}
-	if (IsInputScope(address)) {
+	if (IncludesInputScope(address)) {
 		if (outObjects != nullptr && count < maxObjects)
 			outObjects[count] = kInputStreamObjectId;
 		++count;
@@ -225,9 +241,9 @@ UInt32 OwnedObjectList(AudioObjectID objectId,
 	if (objectId == kAudioObjectPlugInObject) {
 		addIfMatching(kDeviceObjectId);
 	} else if (objectId == kDeviceObjectId) {
-		if (IsOutputScope(address))
+		if (IncludesOutputScope(address))
 			addIfMatching(kOutputStreamObjectId);
-		if (IsInputScope(address))
+		if (IncludesInputScope(address))
 			addIfMatching(kInputStreamObjectId);
 	}
 
@@ -363,6 +379,7 @@ bool HasDeviceProperty(const AudioObjectPropertyAddress *address) noexcept
 	case kAudioDevicePropertyTransportType:
 	case kAudioDevicePropertyClockDomain:
 	case kAudioDevicePropertyDeviceIsAlive:
+	case kAudioDevicePropertyIsHidden:
 	case kAudioDevicePropertyDeviceIsRunning:
 	case kAudioDevicePropertyDeviceIsRunningSomewhere:
 	case kAudioDevicePropertyDeviceCanBeDefaultDevice:
@@ -537,7 +554,7 @@ OSStatus STDMETHODCALLTYPE Initialize(AudioServerPlugInDriverRef driver,
 	(void)TimebaseInfo();
 	gStartHostTime.store(mach_absolute_time(), std::memory_order_release);
 	os_log(OS_LOG_DEFAULT,
-		"AKAI EIE Pro HAL plugin initialized (silent transport)");
+		"AKAI EIE Pro HAL plugin initialized (USB playback transport)");
 	return kAudioHardwareNoError;
 }
 
@@ -764,6 +781,8 @@ OSStatus STDMETHODCALLTYPE GetPropertyData(AudioServerPlugInDriverRef driver,
 			return CopyScalar<UInt32>(0, inDataSize, outDataSize, outData);
 		case kAudioDevicePropertyDeviceIsAlive:
 			return CopyScalar<UInt32>(1, inDataSize, outDataSize, outData);
+		case kAudioDevicePropertyIsHidden:
+			return CopyScalar<UInt32>(0, inDataSize, outDataSize, outData);
 		case kAudioDevicePropertyDeviceIsRunning:
 		case kAudioDevicePropertyDeviceIsRunningSomewhere:
 			return CopyScalar<UInt32>(
@@ -913,9 +932,16 @@ OSStatus STDMETHODCALLTYPE StartIO(AudioServerPlugInDriverRef driver,
 	if (deviceObjectId != kDeviceObjectId)
 		return kAudioHardwareBadObjectError;
 
-	gRunningClientCount.fetch_add(1);
+	const UInt32 oldClientCount = gRunningClientCount.fetch_add(1);
+	if (oldClientCount == 0 && !gUsbTransport.Start()) {
+		gRunningClientCount.fetch_sub(1);
+		os_log_error(OS_LOG_DEFAULT,
+			"AKAI EIE Pro HAL StartIO failed: USB transport not ready");
+		return kAudioHardwareNotReadyError;
+	}
+
 	os_log(OS_LOG_DEFAULT,
-		"AKAI EIE Pro HAL StartIO client %{public}u (silent transport)",
+		"AKAI EIE Pro HAL StartIO client %{public}u",
 		clientId);
 	return kAudioHardwareNoError;
 }
@@ -931,9 +957,11 @@ OSStatus STDMETHODCALLTYPE StopIO(AudioServerPlugInDriverRef driver,
 	while (oldCount > 0
 		&& !gRunningClientCount.compare_exchange_weak(oldCount, oldCount - 1)) {
 	}
+	if (oldCount == 1)
+		gUsbTransport.Stop();
 
 	os_log(OS_LOG_DEFAULT,
-		"AKAI EIE Pro HAL StopIO client %{public}u (silent transport)",
+		"AKAI EIE Pro HAL StopIO client %{public}u",
 		clientId);
 	return kAudioHardwareNoError;
 }
@@ -1035,9 +1063,14 @@ OSStatus STDMETHODCALLTYPE DoIOOperation(AudioServerPlugInDriverRef driver,
 	}
 
 	if (operationId == kAudioServerPlugInIOOperationWriteMix) {
-		return streamObjectId == kOutputStreamObjectId
-			? kAudioHardwareNoError
-			: kAudioHardwareBadObjectError;
+		if (streamObjectId != kOutputStreamObjectId)
+			return kAudioHardwareBadObjectError;
+		if (ioMainBuffer != nullptr) {
+			gUsbTransport.EnqueueOutput(
+				static_cast<const Float32 *>(ioMainBuffer),
+				ioBufferFrameSize);
+		}
+		return kAudioHardwareNoError;
 	}
 
 	return kAudioHardwareNoError;

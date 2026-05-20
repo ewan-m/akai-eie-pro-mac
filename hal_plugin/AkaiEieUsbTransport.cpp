@@ -220,6 +220,7 @@ struct AkaiEieUsbTransport::Impl {
 	DeviceInterface **device = nullptr;
 	InterfaceInterface **playInterface = nullptr;
 	InterfaceInterface **dataInterface = nullptr;
+	InterfaceInterface **syncInterface = nullptr;
 	CFRunLoopSourceRef playAsyncSource = nullptr;
 	CFRunLoopSourceRef dataAsyncSource = nullptr;
 	bool deviceOpen = false;
@@ -385,8 +386,30 @@ void AkaiEieUsbTransport::WorkerMain() noexcept
 		impl_->workerRunLoop = runLoop;
 	}
 
+	auto abortActivePipes = [this]() noexcept {
+		if (impl_->playInterface != nullptr && impl_->playPipe != 0)
+			(*impl_->playInterface)->AbortPipe(
+				impl_->playInterface, impl_->playPipe);
+		if (impl_->syncInterface != nullptr && impl_->syncPipe != 0)
+			(*impl_->syncInterface)->AbortPipe(
+				impl_->syncInterface, impl_->syncPipe);
+	};
+	auto drainInFlightTransfers = [this]() noexcept {
+		const auto deadline = std::chrono::steady_clock::now()
+			+ std::chrono::seconds(1);
+		while (inFlightTransfers_.load() > 0
+			&& std::chrono::steady_clock::now() < deadline) {
+			CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.020, true);
+		}
+	};
+
+	const bool usbOpen = OpenUsb();
 	const bool open =
-		OpenUsb() && StartSyncTransfers() && StartPlaybackTransfers();
+		usbOpen && StartSyncTransfers() && StartPlaybackTransfers();
+	if (!open && usbOpen) {
+		abortActivePipes();
+		drainInFlightTransfers();
+	}
 	{
 		std::lock_guard<std::mutex> lock(startMutex_);
 		startSucceeded_ = open;
@@ -400,19 +423,8 @@ void AkaiEieUsbTransport::WorkerMain() noexcept
 			CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.050, true);
 		}
 
-		if (impl_->playInterface != nullptr && impl_->playPipe != 0)
-			(*impl_->playInterface)->AbortPipe(
-				impl_->playInterface, impl_->playPipe);
-		if (impl_->dataInterface != nullptr && impl_->syncPipe != 0)
-			(*impl_->dataInterface)->AbortPipe(
-				impl_->dataInterface, impl_->syncPipe);
-
-		const auto deadline = std::chrono::steady_clock::now()
-			+ std::chrono::seconds(1);
-		while (inFlightTransfers_.load() > 0
-			&& std::chrono::steady_clock::now() < deadline) {
-			CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.020, true);
-		}
+		abortActivePipes();
+		drainInFlightTransfers();
 	}
 
 	started_.store(false);
@@ -592,8 +604,13 @@ bool AkaiEieUsbTransport::OpenUsb() noexcept
 			"AKAI EIE Pro USB: playback isoch OUT pipe not found");
 		return false;
 	}
-	findPipe(impl_->dataInterface, kUSBIn, kUSBIsoc, false, 0, true,
-		&impl_->syncPipe, &impl_->syncMaxPacketSize);
+	if (findPipe(impl_->dataInterface, kUSBIn, kUSBIsoc, false, 0, false,
+		&impl_->syncPipe, &impl_->syncMaxPacketSize)) {
+		impl_->syncInterface = impl_->dataInterface;
+	} else if (findPipe(impl_->playInterface, kUSBIn, kUSBIsoc, false, 0,
+		false, &impl_->syncPipe, &impl_->syncMaxPacketSize)) {
+		impl_->syncInterface = impl_->playInterface;
+	}
 	findPipe(impl_->dataInterface, kUSBIn, kUSBBulk, true,
 		akai_eie::kKnownCaptureEndpointAddress & 0x0f, false,
 		&impl_->capturePipe, &impl_->captureMaxPacketSize);
@@ -640,7 +657,8 @@ bool AkaiEieUsbTransport::OpenUsb() noexcept
 	CFRunLoopAddSource(CFRunLoopGetCurrent(), impl_->playAsyncSource,
 		kCFRunLoopDefaultMode);
 
-	if (impl_->syncPipe != 0) {
+	if (impl_->syncPipe != 0
+		&& impl_->syncInterface == impl_->dataInterface) {
 		result = (*impl_->dataInterface)->CreateInterfaceAsyncEventSource(
 			impl_->dataInterface, &impl_->dataAsyncSource);
 		if (result != kIOReturnSuccess
@@ -668,10 +686,12 @@ bool AkaiEieUsbTransport::OpenUsb() noexcept
 	}
 
 	os_log(OS_LOG_DEFAULT,
-		"AKAI EIE Pro USB: opened playback pipe %{public}u maxPacket=%{public}u frameList=%{public}uus startFrame=%{public}llu syncPipe=%{public}u capturePipe=%{public}u",
+		"AKAI EIE Pro USB: opened playback pipe %{public}u maxPacket=%{public}u frameList=%{public}uus startFrame=%{public}llu syncPipe=%{public}u syncOnData=%{public}u capturePipe=%{public}u",
 		impl_->playPipe, impl_->playMaxPacketSize, impl_->frameListMicros,
 		static_cast<unsigned long long>(impl_->nextFrameStart),
-		impl_->syncPipe, impl_->capturePipe);
+		impl_->syncPipe,
+		impl_->syncInterface == impl_->dataInterface ? 1u : 0u,
+		impl_->capturePipe);
 	return true;
 }
 
@@ -692,6 +712,7 @@ void AkaiEieUsbTransport::CloseUsb() noexcept
 
 	ReleaseInterface(&impl_->dataInterface, &impl_->dataInterfaceOpen);
 	ReleaseInterface(&impl_->playInterface, &impl_->playInterfaceOpen);
+	impl_->syncInterface = nullptr;
 
 	if (impl_->device != nullptr) {
 		if (impl_->deviceOpen) {
@@ -741,7 +762,7 @@ bool AkaiEieUsbTransport::StartPlaybackTransfers() noexcept
 bool AkaiEieUsbTransport::SubmitSyncTransfer(
 	std::size_t transferIndex) noexcept
 {
-	if (impl_->dataInterface == nullptr || impl_->syncPipe == 0
+	if (impl_->syncInterface == nullptr || impl_->syncPipe == 0
 		|| transferIndex >= impl_->syncTransfers.size()
 		|| stopRequested_.load()) {
 		return false;
@@ -769,8 +790,8 @@ bool AkaiEieUsbTransport::SubmitSyncTransfer(
 
 	transfer.submitted = true;
 	inFlightTransfers_.fetch_add(1);
-	const IOReturn result = (*impl_->dataInterface)->ReadIsochPipeAsync(
-		impl_->dataInterface, impl_->syncPipe, transfer.buffer.data(),
+	const IOReturn result = (*impl_->syncInterface)->ReadIsochPipeAsync(
+		impl_->syncInterface, impl_->syncPipe, transfer.buffer.data(),
 		frameStart, 1, &transfer.frame, &AkaiEieUsbTransport::SyncComplete,
 		&transfer);
 	if (result != kIOReturnSuccess) {
@@ -944,12 +965,12 @@ bool AkaiEieUsbTransport::ReadCurrentUsbFrame(
 bool AkaiEieUsbTransport::ReadCurrentDataUsbFrame(
 	std::uint64_t *outFrame) noexcept
 {
-	if (impl_->dataInterface == nullptr || outFrame == nullptr)
+	if (impl_->syncInterface == nullptr || outFrame == nullptr)
 		return false;
 
 	AbsoluteTime atTime {};
-	const IOReturn result = (*impl_->dataInterface)->GetBusFrameNumber(
-		impl_->dataInterface, outFrame, &atTime);
+	const IOReturn result = (*impl_->syncInterface)->GetBusFrameNumber(
+		impl_->syncInterface, outFrame, &atTime);
 	return result == kIOReturnSuccess;
 }
 

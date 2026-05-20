@@ -291,6 +291,16 @@ make debug              # Build with debug symbols
 - **Multi-format output**: Proper bit scaling for each ALSA format
 - **ALSA integration**: Standard PCM interface with hardware constraints
 
+### Portable Protocol Layer
+- **Location**: `protocol/`
+- **Purpose**: Extracts the AKAI-specific USB control sequence, playback timing,
+  isochronous packet layout, and capture frame decoding into standalone C++.
+- **macOS path**: Intended to back a future AudioDriverKit/USBDriverKit dext, or
+  a CoreAudio HAL plugin fallback with a separate USB transport layer.
+- **Distribution note**: Request Apple DriverKit entitlements early:
+  `com.apple.developer.driverkit`, `com.apple.developer.driverkit.family.audio`,
+  and `com.apple.developer.driverkit.transport.usb` for `09e8:0010`.
+
 ### Audio Processing
 - **Raw bit extraction**: 64-byte frames → 4-channel 24-bit samples
 - **Format conversion**: Proper scaling to S16_LE/S24_LE/S32_LE

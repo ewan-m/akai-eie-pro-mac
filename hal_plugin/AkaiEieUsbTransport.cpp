@@ -39,6 +39,7 @@ namespace akai_eie_hal
 		constexpr std::uint64_t kUsbScheduleRecoveryLeadBusFrames = 24;
 		constexpr std::uint32_t kIsoSubmitAttemptCount = 4;
 		constexpr std::uint32_t kMaxConsecutivePlaybackErrors = 3;
+		constexpr std::uint32_t kMaxConsecutiveEmptySyncPackets = 64;
 		constexpr std::chrono::milliseconds kStartTimeout{12000};
 		constexpr std::chrono::milliseconds kRestartBackoff{250};
 
@@ -91,9 +92,7 @@ namespace akai_eie_hal
 			constexpr std::uint32_t kNominalFramesPerMillisecond =
 				kSampleRateHz / 1000;
 			constexpr std::uint32_t kToleranceFrames = 8;
-			return framesPerMillisecond >= kNominalFramesPerMillisecond - kToleranceFrames
-				   && framesPerMillisecond <= kNominalFramesPerMillisecond + kToleranceFrames
-				   && framesPerMillisecond < 50;
+			return framesPerMillisecond >= kNominalFramesPerMillisecond - kToleranceFrames && framesPerMillisecond <= kNominalFramesPerMillisecond + kToleranceFrames && framesPerMillisecond < 50;
 		}
 
 		std::uint32_t DecodeSyncFeedbackFrames(
@@ -111,9 +110,7 @@ namespace akai_eie_hal
 			if (actualBytes >= 3)
 			{
 				const std::uint32_t raw10_14 =
-					static_cast<std::uint32_t>(buffer[0])
-					| (static_cast<std::uint32_t>(buffer[1]) << 8)
-					| (static_cast<std::uint32_t>(buffer[2]) << 16);
+					static_cast<std::uint32_t>(buffer[0]) | (static_cast<std::uint32_t>(buffer[1]) << 8) | (static_cast<std::uint32_t>(buffer[2]) << 16);
 				const std::uint32_t frames =
 					(raw10_14 + (1u << 13)) >> 14;
 				if (IsPlausibleStandardSyncFeedback(frames))
@@ -123,14 +120,9 @@ namespace akai_eie_hal
 			if (actualBytes >= 4)
 			{
 				const std::uint32_t raw16_16 =
-					static_cast<std::uint32_t>(buffer[0])
-					| (static_cast<std::uint32_t>(buffer[1]) << 8)
-					| (static_cast<std::uint32_t>(buffer[2]) << 16)
-					| (static_cast<std::uint32_t>(buffer[3]) << 24);
+					static_cast<std::uint32_t>(buffer[0]) | (static_cast<std::uint32_t>(buffer[1]) << 8) | (static_cast<std::uint32_t>(buffer[2]) << 16) | (static_cast<std::uint32_t>(buffer[3]) << 24);
 				const std::uint32_t frames = static_cast<std::uint32_t>(
-					((static_cast<std::uint64_t>(raw16_16) * 8u)
-					 + (1u << 15))
-					>> 16);
+					((static_cast<std::uint64_t>(raw16_16) * 8u) + (1u << 15)) >> 16);
 				if (IsPlausibleStandardSyncFeedback(frames))
 					return frames;
 			}
@@ -326,6 +318,9 @@ namespace akai_eie_hal
 		std::uint64_t syncErrorCount = 0;
 		std::uint64_t playbackCompletionErrorCount = 0;
 		std::uint32_t consecutivePlaybackErrorCount = 0;
+		std::uint32_t consecutiveEmptySyncPacketCount = 0;
+		bool syncFeedbackDisabled = false;
+		bool syncFeedbackEmptyLogged = false;
 
 		std::mutex runLoopMutex;
 		CFRunLoopRef workerRunLoop = nullptr;
@@ -948,7 +943,7 @@ namespace akai_eie_hal
 	bool AkaiEieUsbTransport::SubmitSyncTransfer(
 		std::size_t transferIndex) noexcept
 	{
-		if (impl_->syncInterface == nullptr || impl_->syncPipe == 0 || transferIndex >= impl_->syncTransfers.size() || stopRequested_.load())
+		if (impl_->syncInterface == nullptr || impl_->syncPipe == 0 || impl_->syncFeedbackDisabled || transferIndex >= impl_->syncTransfers.size() || stopRequested_.load())
 		{
 			return false;
 		}
@@ -989,8 +984,7 @@ namespace akai_eie_hal
 
 			transfer.submitted = false;
 			inFlightTransfers_.fetch_sub(1);
-			if (lastResult == kIOReturnIsoTooOld
-				|| lastResult == kIOReturnIsoTooNew)
+			if (lastResult == kIOReturnIsoTooOld || lastResult == kIOReturnIsoTooNew)
 			{
 				if (ReadCurrentDataUsbFrame(&currentFrame))
 					impl_->syncNextFrameStart =
@@ -1088,17 +1082,14 @@ namespace akai_eie_hal
 
 			transfer.submitted = true;
 			inFlightTransfers_.fetch_add(1);
-			const IOReturn result = (*impl_->playInterface)->WriteIsochPipeAsync(impl_->playInterface, impl_->playPipe, transfer.buffer.data(),
-																				 oldNextFrameStart,
-																				 kPlaybackIsoPacketCount, transfer.frames.data(), &AkaiEieUsbTransport::PlaybackComplete, &transfer);
+			const IOReturn result = (*impl_->playInterface)->WriteIsochPipeAsync(impl_->playInterface, impl_->playPipe, transfer.buffer.data(), oldNextFrameStart, kPlaybackIsoPacketCount, transfer.frames.data(), &AkaiEieUsbTransport::PlaybackComplete, &transfer);
 			if (result == kIOReturnSuccess)
 				return true;
 
 			transfer.submitted = false;
 			inFlightTransfers_.fetch_sub(1);
 			impl_->nextFrameStart = oldNextFrameStart;
-			if (result == kIOReturnIsoTooOld
-				|| result == kIOReturnIsoTooNew)
+			if (result == kIOReturnIsoTooOld || result == kIOReturnIsoTooNew)
 			{
 				if (ReadCurrentUsbFrame(&currentFrame))
 					impl_->nextFrameStart =
@@ -1179,14 +1170,33 @@ namespace akai_eie_hal
 			{
 				impl_->syncFeedbackFrames.fetch_add(
 					framesElapsed, std::memory_order_acq_rel);
+				impl_->consecutiveEmptySyncPacketCount = 0;
 				acceptedSyncFeedback = true;
 			}
 		}
 
-		if (!acceptedSyncFeedback
-			&& (result != kIOReturnSuccess
-				|| transfer.frame.frStatus != kIOReturnSuccess)
-			&& !stopRequested_.load() && !restartRequested_.load())
+		const bool emptySyncPacket =
+			result == kIOReturnSuccess && transfer.frame.frStatus == kIOReturnUnderrun && transfer.frame.frActCount == 0;
+		if (!acceptedSyncFeedback && emptySyncPacket)
+		{
+			++impl_->consecutiveEmptySyncPacketCount;
+			if (!impl_->syncFeedbackEmptyLogged)
+			{
+				impl_->syncFeedbackEmptyLogged = true;
+				os_log(OS_LOG_DEFAULT,
+					   "AKAI EIE Pro USB: sync feedback endpoint returned empty packets; holding nominal playback timing");
+			}
+			if (!impl_->syncFeedbackDisabled && impl_->consecutiveEmptySyncPacketCount >= kMaxConsecutiveEmptySyncPackets)
+			{
+				impl_->syncFeedbackDisabled = true;
+				impl_->syncFeedbackFrames.store(0, std::memory_order_release);
+				os_log(OS_LOG_DEFAULT,
+					   "AKAI EIE Pro USB: sync feedback disabled after %{public}u empty packets; using nominal playback timing",
+					   impl_->consecutiveEmptySyncPacketCount);
+			}
+		}
+
+		if (!acceptedSyncFeedback && !emptySyncPacket && (result != kIOReturnSuccess || transfer.frame.frStatus != kIOReturnSuccess) && !stopRequested_.load() && !restartRequested_.load())
 		{
 			++impl_->syncErrorCount;
 			if (impl_->syncErrorCount <= 5)
@@ -1200,8 +1210,7 @@ namespace akai_eie_hal
 			}
 		}
 
-		if (!stopRequested_.load() && !restartRequested_.load()
-			&& !SubmitSyncTransfer(transferIndex))
+		if (!impl_->syncFeedbackDisabled && !stopRequested_.load() && !restartRequested_.load() && !SubmitSyncTransfer(transferIndex))
 		{
 			RequestRestart("sync transfer resubmit failed");
 		}
@@ -1276,8 +1285,7 @@ namespace akai_eie_hal
 			impl_->consecutivePlaybackErrorCount = 0;
 		}
 
-		if (!stopRequested_.load() && !restartRequested_.load()
-			&& !SubmitPlaybackTransfer(transferIndex))
+		if (!stopRequested_.load() && !restartRequested_.load() && !SubmitPlaybackTransfer(transferIndex))
 		{
 			RequestRestart("playback transfer resubmit failed");
 		}
@@ -1322,8 +1330,7 @@ namespace akai_eie_hal
 		{
 			std::lock_guard<std::mutex> lock(impl_->outputMutex);
 
-			if (!impl_->outputPrimed
-				&& impl_->outputFrameCount >= kOutputReprimeFrameCount)
+			if (!impl_->outputPrimed && impl_->outputFrameCount >= kOutputReprimeFrameCount)
 			{
 				impl_->outputPrimed = true;
 				++impl_->rebufferCount;
@@ -1333,6 +1340,14 @@ namespace akai_eie_hal
 						   "AKAI EIE Pro USB: playback re-primed %{public}zu frames",
 						   impl_->outputFrameCount);
 				}
+			}
+
+			if (impl_->outputPrimed && impl_->outputFrameCount < frameCount)
+			{
+				impl_->outputPrimed = false;
+				impl_->outputReadFrame = 0;
+				impl_->outputWriteFrame = 0;
+				impl_->outputFrameCount = 0;
 			}
 
 			while (impl_->outputPrimed && copied < frameCount && impl_->outputFrameCount > 0)
@@ -1356,8 +1371,7 @@ namespace akai_eie_hal
 				copied += framesToCopy;
 			}
 
-			if (impl_->outputPrimed && copied < frameCount
-				&& impl_->outputFrameCount == 0)
+			if (impl_->outputPrimed && copied < frameCount && impl_->outputFrameCount == 0)
 			{
 				impl_->outputPrimed = false;
 			}
@@ -1389,6 +1403,9 @@ namespace akai_eie_hal
 		impl_->syncErrorCount = 0;
 		impl_->playbackCompletionErrorCount = 0;
 		impl_->consecutivePlaybackErrorCount = 0;
+		impl_->consecutiveEmptySyncPacketCount = 0;
+		impl_->syncFeedbackDisabled = false;
+		impl_->syncFeedbackEmptyLogged = false;
 		impl_->syncFeedbackFrames.store(0, std::memory_order_release);
 	}
 

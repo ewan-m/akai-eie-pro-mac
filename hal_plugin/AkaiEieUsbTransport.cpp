@@ -24,7 +24,7 @@ namespace akai_eie_hal
 		constexpr std::uint32_t kSampleRateHz = 48000;
 		constexpr std::size_t kOutputRingFrameCount = kSampleRateHz / 2;
 		constexpr std::size_t kOutputPrimeFrameCount = kSampleRateHz / 20;
-		constexpr std::size_t kOutputReprimeFrameCount = kSampleRateHz / 100;
+		constexpr std::size_t kOutputReprimeFrameCount = kOutputPrimeFrameCount;
 		constexpr std::size_t kOutputLowWaterFrameCount = kSampleRateHz / 40;
 		constexpr std::size_t kOutputHighWaterFrameCount = kSampleRateHz / 5;
 		constexpr std::size_t kPlaybackTransferCount = 6;
@@ -76,6 +76,10 @@ namespace akai_eie_hal
 				return "bad argument";
 			case kIOReturnNoBandwidth:
 				return "no bandwidth";
+			case kIOReturnUnderrun:
+				return "underrun";
+			case kIOReturnOverrun:
+				return "overrun";
 			default:
 				return "error";
 			}
@@ -1166,7 +1170,8 @@ namespace akai_eie_hal
 			return;
 		}
 
-		if (result == kIOReturnSuccess && transfer.frame.frStatus == kIOReturnSuccess && transfer.frame.frActCount > 0)
+		bool acceptedSyncFeedback = false;
+		if (result == kIOReturnSuccess && transfer.frame.frActCount > 0)
 		{
 			const std::uint32_t framesElapsed = DecodeSyncFeedbackFrames(
 				transfer.buffer.data(), transfer.frame.frActCount);
@@ -1174,16 +1179,23 @@ namespace akai_eie_hal
 			{
 				impl_->syncFeedbackFrames.fetch_add(
 					framesElapsed, std::memory_order_acq_rel);
+				acceptedSyncFeedback = true;
 			}
 		}
-		else if (!stopRequested_.load() && !restartRequested_.load())
+
+		if (!acceptedSyncFeedback
+			&& (result != kIOReturnSuccess
+				|| transfer.frame.frStatus != kIOReturnSuccess)
+			&& !stopRequested_.load() && !restartRequested_.load())
 		{
 			++impl_->syncErrorCount;
 			if (impl_->syncErrorCount <= 5)
 			{
 				os_log_error(OS_LOG_DEFAULT,
-							 "AKAI EIE Pro USB: sync read completion failed %{public}s (%{public}#x) frameStatus=%{public}#x act=%{public}u",
-							 IOReturnName(result), result, transfer.frame.frStatus,
+							 "AKAI EIE Pro USB: sync read completion failed %{public}s (%{public}#x) frameStatus=%{public}s (%{public}#x) act=%{public}u",
+							 IOReturnName(result), result,
+							 IOReturnName(transfer.frame.frStatus),
+							 transfer.frame.frStatus,
 							 transfer.frame.frActCount);
 			}
 		}

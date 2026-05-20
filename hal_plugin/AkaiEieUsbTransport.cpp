@@ -21,7 +21,12 @@ using InterfaceInterface = IOUSBInterfaceInterface942;
 
 constexpr std::uint32_t kSampleRateHz = 48000;
 constexpr std::size_t kOutputRingFrameCount = kSampleRateHz / 2;
+constexpr std::size_t kOutputPrimeFrameCount = kSampleRateHz / 20;
+constexpr std::size_t kOutputLowWaterFrameCount = kSampleRateHz / 40;
+constexpr std::size_t kOutputHighWaterFrameCount = kSampleRateHz / 5;
 constexpr std::size_t kPlaybackTransferCount = 4;
+constexpr std::size_t kSyncTransferCount = 2;
+constexpr std::size_t kMaxSyncPacketBytes = 64;
 constexpr std::uint32_t kPlaybackIsoPacketCount =
 	akai_eie::kDefaultPlaybackIsoPacketCount;
 constexpr std::uint32_t kMaxPlaybackFramesPerTransfer = 480;
@@ -204,10 +209,19 @@ struct AkaiEieUsbTransport::Impl {
 		std::array<IOUSBIsocFrame, kPlaybackIsoPacketCount> frames {};
 	};
 
+	struct SyncTransfer {
+		AkaiEieUsbTransport *owner = nullptr;
+		std::size_t index = 0;
+		bool submitted = false;
+		std::array<std::uint8_t, kMaxSyncPacketBytes> buffer {};
+		IOUSBIsocFrame frame {};
+	};
+
 	DeviceInterface **device = nullptr;
 	InterfaceInterface **playInterface = nullptr;
 	InterfaceInterface **dataInterface = nullptr;
 	CFRunLoopSourceRef playAsyncSource = nullptr;
+	CFRunLoopSourceRef dataAsyncSource = nullptr;
 	bool deviceOpen = false;
 	bool playInterfaceOpen = false;
 	bool dataInterfaceOpen = false;
@@ -219,8 +233,11 @@ struct AkaiEieUsbTransport::Impl {
 	UInt16 captureMaxPacketSize = 0;
 	std::uint32_t frameListMicros = 1000;
 	std::uint64_t nextFrameStart = 0;
+	std::uint64_t syncNextFrameStart = 0;
+	std::atomic<std::uint32_t> syncFeedbackFrames {0};
 	akai_eie::PlaybackTimingState playbackTiming {};
 	std::array<PlaybackTransfer, kPlaybackTransferCount> playbackTransfers {};
+	std::array<SyncTransfer, kSyncTransferCount> syncTransfers {};
 
 	std::mutex outputMutex;
 	std::array<std::uint8_t,
@@ -228,8 +245,11 @@ struct AkaiEieUsbTransport::Impl {
 	std::size_t outputReadFrame = 0;
 	std::size_t outputWriteFrame = 0;
 	std::size_t outputFrameCount = 0;
+	bool outputPrimed = false;
 	std::uint64_t underrunCount = 0;
+	std::uint64_t rebufferCount = 0;
 	std::uint64_t droppedFrameCount = 0;
+	std::uint64_t syncErrorCount = 0;
 
 	std::mutex runLoopMutex;
 	CFRunLoopRef workerRunLoop = nullptr;
@@ -242,6 +262,10 @@ AkaiEieUsbTransport::AkaiEieUsbTransport()
 		for (std::size_t i = 0; i < impl_->playbackTransfers.size(); ++i) {
 			impl_->playbackTransfers[i].owner = this;
 			impl_->playbackTransfers[i].index = i;
+		}
+		for (std::size_t i = 0; i < impl_->syncTransfers.size(); ++i) {
+			impl_->syncTransfers[i].owner = this;
+			impl_->syncTransfers[i].index = i;
 		}
 	}
 }
@@ -343,6 +367,13 @@ void AkaiEieUsbTransport::EnqueueOutput(const Float32 *interleaved,
 			(impl_->outputWriteFrame + 1) % kOutputRingFrameCount;
 		++impl_->outputFrameCount;
 	}
+	if (!impl_->outputPrimed
+		&& impl_->outputFrameCount >= kOutputPrimeFrameCount) {
+		impl_->outputPrimed = true;
+		os_log(OS_LOG_DEFAULT,
+			"AKAI EIE Pro USB: playback buffer primed %{public}zu frames",
+			impl_->outputFrameCount);
+	}
 }
 
 void AkaiEieUsbTransport::WorkerMain() noexcept
@@ -354,7 +385,8 @@ void AkaiEieUsbTransport::WorkerMain() noexcept
 		impl_->workerRunLoop = runLoop;
 	}
 
-	const bool open = OpenUsb() && StartPlaybackTransfers();
+	const bool open =
+		OpenUsb() && StartSyncTransfers() && StartPlaybackTransfers();
 	{
 		std::lock_guard<std::mutex> lock(startMutex_);
 		startSucceeded_ = open;
@@ -371,6 +403,9 @@ void AkaiEieUsbTransport::WorkerMain() noexcept
 		if (impl_->playInterface != nullptr && impl_->playPipe != 0)
 			(*impl_->playInterface)->AbortPipe(
 				impl_->playInterface, impl_->playPipe);
+		if (impl_->dataInterface != nullptr && impl_->syncPipe != 0)
+			(*impl_->dataInterface)->AbortPipe(
+				impl_->dataInterface, impl_->syncPipe);
 
 		const auto deadline = std::chrono::steady_clock::now()
 			+ std::chrono::seconds(1);
@@ -605,12 +640,32 @@ bool AkaiEieUsbTransport::OpenUsb() noexcept
 	CFRunLoopAddSource(CFRunLoopGetCurrent(), impl_->playAsyncSource,
 		kCFRunLoopDefaultMode);
 
+	if (impl_->syncPipe != 0) {
+		result = (*impl_->dataInterface)->CreateInterfaceAsyncEventSource(
+			impl_->dataInterface, &impl_->dataAsyncSource);
+		if (result != kIOReturnSuccess
+			|| impl_->dataAsyncSource == nullptr) {
+			os_log_error(OS_LOG_DEFAULT,
+				"AKAI EIE Pro USB: data async source failed %{public}s (%{public}#x)",
+				IOReturnName(result), result);
+			return false;
+		}
+		CFRunLoopAddSource(CFRunLoopGetCurrent(), impl_->dataAsyncSource,
+			kCFRunLoopDefaultMode);
+	}
+
 	(*impl_->playInterface)->GetFrameListTime(impl_->playInterface,
 		&impl_->frameListMicros);
 	std::uint64_t currentFrame = 0;
 	if (!ReadCurrentUsbFrame(&currentFrame))
 		currentFrame = 0;
 	impl_->nextFrameStart = currentFrame + kUsbScheduleLeadBusFrames;
+	if (impl_->syncPipe != 0) {
+		if (!ReadCurrentDataUsbFrame(&currentFrame))
+			currentFrame = 0;
+		impl_->syncNextFrameStart =
+			currentFrame + kUsbScheduleLeadBusFrames;
+	}
 
 	os_log(OS_LOG_DEFAULT,
 		"AKAI EIE Pro USB: opened playback pipe %{public}u maxPacket=%{public}u frameList=%{public}uus startFrame=%{public}llu syncPipe=%{public}u capturePipe=%{public}u",
@@ -627,6 +682,12 @@ void AkaiEieUsbTransport::CloseUsb() noexcept
 			kCFRunLoopDefaultMode);
 		CFRelease(impl_->playAsyncSource);
 		impl_->playAsyncSource = nullptr;
+	}
+	if (impl_->dataAsyncSource != nullptr) {
+		CFRunLoopRemoveSource(CFRunLoopGetCurrent(), impl_->dataAsyncSource,
+			kCFRunLoopDefaultMode);
+		CFRelease(impl_->dataAsyncSource);
+		impl_->dataAsyncSource = nullptr;
 	}
 
 	ReleaseInterface(&impl_->dataInterface, &impl_->dataInterfaceOpen);
@@ -648,7 +709,24 @@ void AkaiEieUsbTransport::CloseUsb() noexcept
 	impl_->syncMaxPacketSize = 0;
 	impl_->captureMaxPacketSize = 0;
 	impl_->nextFrameStart = 0;
+	impl_->syncNextFrameStart = 0;
+	impl_->syncFeedbackFrames.store(0, std::memory_order_release);
 	impl_->playbackTiming = {};
+}
+
+bool AkaiEieUsbTransport::StartSyncTransfers() noexcept
+{
+	if (impl_->syncPipe == 0) {
+		os_log(OS_LOG_DEFAULT,
+			"AKAI EIE Pro USB: sync feedback endpoint not available");
+		return true;
+	}
+
+	for (std::size_t i = 0; i < impl_->syncTransfers.size(); ++i) {
+		if (!SubmitSyncTransfer(i))
+			return false;
+	}
+	return true;
 }
 
 bool AkaiEieUsbTransport::StartPlaybackTransfers() noexcept
@@ -657,6 +735,56 @@ bool AkaiEieUsbTransport::StartPlaybackTransfers() noexcept
 		if (!SubmitPlaybackTransfer(i))
 			return false;
 	}
+	return true;
+}
+
+bool AkaiEieUsbTransport::SubmitSyncTransfer(
+	std::size_t transferIndex) noexcept
+{
+	if (impl_->dataInterface == nullptr || impl_->syncPipe == 0
+		|| transferIndex >= impl_->syncTransfers.size()
+		|| stopRequested_.load()) {
+		return false;
+	}
+
+	auto &transfer = impl_->syncTransfers[transferIndex];
+	std::memset(transfer.buffer.data(), 0, transfer.buffer.size());
+	transfer.frame.frStatus = kIOReturnSuccess;
+	transfer.frame.frReqCount = static_cast<UInt16>(
+		std::min<std::size_t>(impl_->syncMaxPacketSize,
+			transfer.buffer.size()));
+	transfer.frame.frActCount = 0;
+
+	std::uint64_t currentFrame = 0;
+	const bool haveCurrentFrame = ReadCurrentDataUsbFrame(&currentFrame);
+	if (haveCurrentFrame
+		&& impl_->syncNextFrameStart
+			< currentFrame + kUsbScheduleLeadBusFrames) {
+		impl_->syncNextFrameStart =
+			currentFrame + kUsbScheduleLeadBusFrames;
+	}
+
+	const std::uint64_t frameStart = impl_->syncNextFrameStart;
+	++impl_->syncNextFrameStart;
+
+	transfer.submitted = true;
+	inFlightTransfers_.fetch_add(1);
+	const IOReturn result = (*impl_->dataInterface)->ReadIsochPipeAsync(
+		impl_->dataInterface, impl_->syncPipe, transfer.buffer.data(),
+		frameStart, 1, &transfer.frame, &AkaiEieUsbTransport::SyncComplete,
+		&transfer);
+	if (result != kIOReturnSuccess) {
+		transfer.submitted = false;
+		inFlightTransfers_.fetch_sub(1);
+		os_log_error(OS_LOG_DEFAULT,
+			"AKAI EIE Pro USB: sync read submit failed %{public}s (%{public}#x) start=%{public}llu current=%{public}llu",
+			IOReturnName(result), result,
+			static_cast<unsigned long long>(frameStart),
+			static_cast<unsigned long long>(
+				haveCurrentFrame ? currentFrame : 0));
+		return false;
+	}
+
 	return true;
 }
 
@@ -670,9 +798,19 @@ bool AkaiEieUsbTransport::SubmitPlaybackTransfer(
 	}
 
 	auto &transfer = impl_->playbackTransfers[transferIndex];
-	const std::uint32_t framesWanted =
+	const std::uint32_t feedbackFrames = impl_->syncFeedbackFrames.exchange(
+		0, std::memory_order_acq_rel);
+	std::uint32_t framesWanted =
 		akai_eie::CalculatePlaybackFramesWanted(kSampleRateHz,
-			impl_->playbackTiming);
+			impl_->playbackTiming, feedbackFrames);
+	const std::size_t bufferedFrames = BufferedOutputFrames();
+	if (bufferedFrames > kOutputHighWaterFrameCount
+		&& framesWanted < kMaxPlaybackFramesPerTransfer) {
+		++framesWanted;
+	} else if (bufferedFrames < kOutputLowWaterFrameCount
+		&& framesWanted > 1) {
+		--framesWanted;
+	}
 	if (framesWanted > kMaxPlaybackFramesPerTransfer)
 		return false;
 
@@ -738,6 +876,38 @@ bool AkaiEieUsbTransport::SubmitPlaybackTransfer(
 	return true;
 }
 
+void AkaiEieUsbTransport::HandleSyncComplete(std::size_t transferIndex,
+	IOReturn result) noexcept
+{
+	if (transferIndex >= impl_->syncTransfers.size())
+		return;
+
+	auto &transfer = impl_->syncTransfers[transferIndex];
+	transfer.submitted = false;
+	inFlightTransfers_.fetch_sub(1);
+
+	if (result == kIOReturnSuccess
+		&& transfer.frame.frStatus == kIOReturnSuccess
+		&& transfer.frame.frActCount > 0) {
+		const std::uint8_t framesElapsed = transfer.buffer[0];
+		if (akai_eie::IsReasonableSyncFeedback(framesElapsed)) {
+			impl_->syncFeedbackFrames.fetch_add(
+				framesElapsed, std::memory_order_acq_rel);
+		}
+	} else if (!stopRequested_.load()) {
+		++impl_->syncErrorCount;
+		if (impl_->syncErrorCount <= 5) {
+			os_log_error(OS_LOG_DEFAULT,
+				"AKAI EIE Pro USB: sync read completion failed %{public}s (%{public}#x) frameStatus=%{public}#x act=%{public}u",
+				IOReturnName(result), result, transfer.frame.frStatus,
+				transfer.frame.frActCount);
+		}
+	}
+
+	if (!stopRequested_.load())
+		SubmitSyncTransfer(transferIndex);
+}
+
 void AkaiEieUsbTransport::HandlePlaybackComplete(std::size_t transferIndex,
 	IOReturn result) noexcept
 {
@@ -771,6 +941,24 @@ bool AkaiEieUsbTransport::ReadCurrentUsbFrame(
 	return result == kIOReturnSuccess;
 }
 
+bool AkaiEieUsbTransport::ReadCurrentDataUsbFrame(
+	std::uint64_t *outFrame) noexcept
+{
+	if (impl_->dataInterface == nullptr || outFrame == nullptr)
+		return false;
+
+	AbsoluteTime atTime {};
+	const IOReturn result = (*impl_->dataInterface)->GetBusFrameNumber(
+		impl_->dataInterface, outFrame, &atTime);
+	return result == kIOReturnSuccess;
+}
+
+std::size_t AkaiEieUsbTransport::BufferedOutputFrames() noexcept
+{
+	std::lock_guard<std::mutex> lock(impl_->outputMutex);
+	return impl_->outputFrameCount;
+}
+
 std::size_t AkaiEieUsbTransport::PopOutputFrames(std::uint8_t *outFrames,
 	std::size_t frameCount) noexcept
 {
@@ -780,7 +968,19 @@ std::size_t AkaiEieUsbTransport::PopOutputFrames(std::uint8_t *outFrames,
 	std::size_t copied = 0;
 	{
 		std::lock_guard<std::mutex> lock(impl_->outputMutex);
-		while (copied < frameCount && impl_->outputFrameCount > 0) {
+		if (!impl_->outputPrimed) {
+			copied = 0;
+		} else if (impl_->outputFrameCount < frameCount) {
+			impl_->outputPrimed = false;
+			++impl_->rebufferCount;
+			if (impl_->rebufferCount <= 5) {
+				os_log(OS_LOG_DEFAULT,
+					"AKAI EIE Pro USB: playback buffer underrun buffered=%{public}zu wanted=%{public}zu; rebuffering",
+					impl_->outputFrameCount, frameCount);
+			}
+		}
+		while (impl_->outputPrimed && copied < frameCount
+			&& impl_->outputFrameCount > 0) {
 			const std::size_t contiguousAvailable =
 				std::min(impl_->outputFrameCount,
 					kOutputRingFrameCount - impl_->outputReadFrame);
@@ -821,8 +1021,22 @@ void AkaiEieUsbTransport::ResetOutputRing() noexcept
 	impl_->outputReadFrame = 0;
 	impl_->outputWriteFrame = 0;
 	impl_->outputFrameCount = 0;
+	impl_->outputPrimed = false;
 	impl_->underrunCount = 0;
+	impl_->rebufferCount = 0;
 	impl_->droppedFrameCount = 0;
+	impl_->syncErrorCount = 0;
+	impl_->syncFeedbackFrames.store(0, std::memory_order_release);
+}
+
+void AkaiEieUsbTransport::SyncComplete(void *refcon, IOReturn result,
+	void *arg0) noexcept
+{
+	(void)arg0;
+	auto *transfer = static_cast<Impl::SyncTransfer *>(refcon);
+	if (transfer == nullptr || transfer->owner == nullptr)
+		return;
+	transfer->owner->HandleSyncComplete(transfer->index, result);
 }
 
 void AkaiEieUsbTransport::PlaybackComplete(void *refcon, IOReturn result,

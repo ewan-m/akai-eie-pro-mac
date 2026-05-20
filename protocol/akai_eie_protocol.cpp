@@ -172,7 +172,6 @@ std::size_t BuildResetControlTransfers(std::uint32_t sample_rate,
 std::uint32_t CalculatePlaybackFramesWanted(std::uint32_t sample_rate,
 	PlaybackTimingState &state, std::uint32_t feedback_frames) noexcept
 {
-	(void)feedback_frames;
 	std::uint32_t frames_wanted = 0;
 
 	switch (sample_rate) {
@@ -189,6 +188,14 @@ std::uint32_t CalculatePlaybackFramesWanted(std::uint32_t sample_rate,
 	default:
 		frames_wanted = (sample_rate * 5) / 1000;
 		break;
+	}
+
+	if (feedback_frames > 0) {
+		const std::uint32_t low =
+			frames_wanted > 8 ? frames_wanted - 8 : 1;
+		const std::uint32_t high = frames_wanted + 8;
+		if (feedback_frames >= low && feedback_frames <= high)
+			frames_wanted = feedback_frames;
 	}
 
 	return frames_wanted;

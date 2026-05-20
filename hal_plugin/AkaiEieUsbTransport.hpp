@@ -33,14 +33,21 @@ private:
 	void WorkerMain() noexcept;
 	bool OpenUsb() noexcept;
 	void CloseUsb() noexcept;
+	bool StartSyncTransfers() noexcept;
 	bool StartPlaybackTransfers() noexcept;
+	bool SubmitSyncTransfer(std::size_t transferIndex) noexcept;
 	bool SubmitPlaybackTransfer(std::size_t transferIndex) noexcept;
+	void HandleSyncComplete(std::size_t transferIndex, IOReturn result) noexcept;
 	void HandlePlaybackComplete(std::size_t transferIndex, IOReturn result) noexcept;
 	bool ReadCurrentUsbFrame(std::uint64_t *outFrame) noexcept;
+	bool ReadCurrentDataUsbFrame(std::uint64_t *outFrame) noexcept;
+	std::size_t BufferedOutputFrames() noexcept;
 	std::size_t PopOutputFrames(std::uint8_t *outFrames,
 		std::size_t frameCount) noexcept;
 	void ResetOutputRing() noexcept;
 
+	static void SyncComplete(void *refcon, IOReturn result,
+		void *arg0) noexcept;
 	static void PlaybackComplete(void *refcon, IOReturn result,
 		void *arg0) noexcept;
 

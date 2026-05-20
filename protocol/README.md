@@ -17,6 +17,8 @@ The goal is for the same code to back either:
 - Device identity constants for `09e8:0010`.
 - The reset/sample-rate control transfer sequence.
 - Playback frame timing and isochronous packet layout helpers.
+- Playback encoding from 4-channel interleaved Float32 into 12-byte AKAI wire
+  frames.
 - Playback transfer filling for already-packed 12-byte AKAI wire frames.
 - Capture decoding from the device's 64-byte USB frames into 1, 2, or 4
   channels of little-endian PCM.

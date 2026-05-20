@@ -301,6 +301,14 @@ make debug              # Build with debug symbols
   `com.apple.developer.driverkit`, `com.apple.developer.driverkit.family.audio`,
   and `com.apple.developer.driverkit.transport.usb` for `09e8:0010`.
 
+### macOS HAL Plugin Prototype
+- **Location**: `hal_plugin/`
+- **Purpose**: Raw `AudioServerPlugInDriverInterface` HAL plugin that presents a
+  silent 4-in/4-out, 48kHz, Float32 `AKAI EIE Pro` device to CoreAudio.
+- **Build**: `make -C hal_plugin`
+- **Install for testing**: `hal_plugin/install.sh` copies the `.driver` bundle to
+  `/Library/Audio/Plug-Ins/HAL/` and restarts `coreaudiod`.
+
 ### Audio Processing
 - **Raw bit extraction**: 64-byte frames → 4-channel 24-bit samples
 - **Format conversion**: Proper scaling to S16_LE/S24_LE/S32_LE

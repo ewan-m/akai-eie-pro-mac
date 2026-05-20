@@ -10,6 +10,7 @@ constexpr std::uint16_t kVendorId = 0x09e8;
 constexpr std::uint16_t kProductId = 0x0010;
 
 constexpr std::uint8_t kKnownCaptureEndpointAddress = 0x86;
+constexpr std::uint32_t kPlaybackChannelCount = 4;
 constexpr std::size_t kPlaybackBytesPerFrame = 12;
 constexpr std::size_t kCaptureBytesPerUsbFrame = 64;
 constexpr std::size_t kDefaultCaptureTransferBytes = 4096;
@@ -66,6 +67,18 @@ struct IsoPacket {
 bool BuildIsoPacketLayout(std::uint32_t frames_wanted,
 	std::uint32_t packet_count, std::uint32_t bytes_per_frame,
 	IsoPacket *packets) noexcept;
+
+// Encodes one CoreAudio-style 4-channel interleaved Float32 playback frame into
+// the AKAI playback wire format: 4 packed signed 24-bit little-endian samples.
+bool EncodePlaybackFrameFromFloat32(
+	const float pcm[kPlaybackChannelCount],
+	std::uint8_t out_frame[kPlaybackBytesPerFrame]) noexcept;
+
+// Encodes as many complete 4-channel Float32 frames as will fit in out_frames.
+// Returns the number of playback frames written.
+std::size_t EncodePlaybackBufferFromFloat32(const float *pcm_interleaved,
+	std::size_t frame_count, std::uint8_t *out_frames,
+	std::size_t out_frame_bytes) noexcept;
 
 struct PlaybackCopyState {
 	std::size_t ring_frame = 0;

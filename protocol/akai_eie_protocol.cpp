@@ -51,6 +51,9 @@ void WriteLE32(std::uint8_t *out, std::uint32_t value) noexcept
 void WriteSampleRatePayload(std::uint32_t sample_rate,
 	std::uint8_t data[kMaxControlPayloadBytes]) noexcept
 {
+	// The AKAI rate requests use the USB Audio Class 3-byte little-endian
+	// sample-rate payload. The extra bytes stay zeroed for templates whose
+	// control transfer length sends fewer than kMaxControlPayloadBytes bytes.
 	data[0] = static_cast<std::uint8_t>(sample_rate & 0xffu);
 	data[1] = static_cast<std::uint8_t>((sample_rate >> 8) & 0xffu);
 	data[2] = static_cast<std::uint8_t>((sample_rate >> 16) & 0xffu);
@@ -74,6 +77,21 @@ std::uint32_t Sample24Bits(std::int32_t sample) noexcept
 std::uint16_t Sample24ToS16Bits(std::int32_t sample) noexcept
 {
 	return static_cast<std::uint16_t>((Sample24Bits(sample) >> 8) & 0xffffu);
+}
+
+std::int32_t Float32ToS24(float sample) noexcept
+{
+	if (!(sample == sample))
+		return 0;
+	if (sample >= 1.0f)
+		return 0x7fffff;
+	if (sample <= -1.0f)
+		return -0x800000;
+
+	const float scale = sample < 0.0f ? 8388608.0f : 8388607.0f;
+	const float scaled = sample * scale;
+	return static_cast<std::int32_t>(
+		scaled >= 0.0f ? scaled + 0.5f : scaled - 0.5f);
 }
 
 bool IsSupportedChannelCount(std::uint32_t channels) noexcept
@@ -154,6 +172,7 @@ std::size_t BuildResetControlTransfers(std::uint32_t sample_rate,
 std::uint32_t CalculatePlaybackFramesWanted(std::uint32_t sample_rate,
 	PlaybackTimingState &state, std::uint32_t feedback_frames) noexcept
 {
+	(void)feedback_frames;
 	std::uint32_t frames_wanted = 0;
 
 	switch (sample_rate) {
@@ -170,12 +189,6 @@ std::uint32_t CalculatePlaybackFramesWanted(std::uint32_t sample_rate,
 	default:
 		frames_wanted = (sample_rate * 5) / 1000;
 		break;
-	}
-
-	if (frames_wanted > 0 && feedback_frames > 0
-		&& feedback_frames + 1 > frames_wanted
-		&& feedback_frames < frames_wanted + 1) {
-		return feedback_frames;
 	}
 
 	return frames_wanted;
@@ -202,6 +215,43 @@ bool BuildIsoPacketLayout(std::uint32_t frames_wanted,
 	}
 
 	return frames_filled == frames_wanted;
+}
+
+bool EncodePlaybackFrameFromFloat32(
+	const float pcm[kPlaybackChannelCount],
+	std::uint8_t out_frame[kPlaybackBytesPerFrame]) noexcept
+{
+	if (pcm == nullptr || out_frame == nullptr)
+		return false;
+
+	for (std::uint32_t channel = 0; channel < kPlaybackChannelCount; ++channel) {
+		const std::uint32_t sample_bits = Sample24Bits(
+			Float32ToS24(pcm[channel]));
+		WriteLE24(out_frame + channel * 3, sample_bits);
+	}
+
+	return true;
+}
+
+std::size_t EncodePlaybackBufferFromFloat32(const float *pcm_interleaved,
+	std::size_t frame_count, std::uint8_t *out_frames,
+	std::size_t out_frame_bytes) noexcept
+{
+	if (pcm_interleaved == nullptr || out_frames == nullptr)
+		return 0;
+
+	const std::size_t max_frames = out_frame_bytes / kPlaybackBytesPerFrame;
+	const std::size_t frames_to_encode =
+		frame_count < max_frames ? frame_count : max_frames;
+
+	for (std::size_t frame_index = 0; frame_index < frames_to_encode;
+		++frame_index) {
+		EncodePlaybackFrameFromFloat32(
+			pcm_interleaved + frame_index * kPlaybackChannelCount,
+			out_frames + frame_index * kPlaybackBytesPerFrame);
+	}
+
+	return frames_to_encode;
 }
 
 bool FillPlaybackTransfer(const std::uint8_t *ring_frames,

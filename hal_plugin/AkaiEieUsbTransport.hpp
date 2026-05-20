@@ -45,6 +45,12 @@ namespace akai_eie_hal
 		bool ReadCurrentUsbFrame(std::uint64_t *outFrame) noexcept;
 		bool ReadCurrentDataUsbFrame(std::uint64_t *outFrame) noexcept;
 		std::size_t BufferedOutputFrames() noexcept;
+		void RememberLastPlaybackFrame(const std::uint8_t *frames,
+									   std::size_t frameCount) noexcept;
+		void FadeInFromSilence(std::uint8_t *frames,
+							   std::size_t frameCount) noexcept;
+		void FadeOutToSilence(std::uint8_t *frames,
+							  std::size_t frameCount) noexcept;
 		std::size_t PopOutputFrames(std::uint8_t *outFrames,
 									std::size_t frameCount) noexcept;
 		void ResetOutputRing() noexcept;

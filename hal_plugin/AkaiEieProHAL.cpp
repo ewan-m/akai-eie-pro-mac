@@ -13,6 +13,8 @@
 #include <cstring>
 #include <dispatch/dispatch.h>
 #include <iterator>
+#include <limits>
+#include <mutex>
 
 #include "AkaiEieUsbTransport.hpp"
 #include "../protocol/akai_eie_protocol.hpp"
@@ -42,6 +44,7 @@ namespace
 
 	std::atomic<UInt32> gRefCount{1};
 	std::atomic<UInt32> gRunningClientCount{0};
+	std::mutex gIOMutex;
 	AudioServerPlugInHostRef gHost = nullptr;
 	std::atomic<UInt64> gStartHostTime{0};
 	std::atomic<UInt64> gClockSeed{1};
@@ -132,6 +135,7 @@ namespace
 	{
 		if (!present)
 		{
+			std::lock_guard<std::mutex> ioLock(gIOMutex);
 			gUsbTransport.Stop();
 			gRunningClientCount.store(0, std::memory_order_release);
 			gStartHostTime.store(0, std::memory_order_release);
@@ -286,9 +290,7 @@ namespace
 			return true;
 		if (DeviceObjectCount() == 0)
 			return false;
-		return objectId == kDeviceObjectId
-			   || objectId == kOutputStreamObjectId
-			   || objectId == kInputStreamObjectId;
+		return objectId == kDeviceObjectId || objectId == kOutputStreamObjectId || objectId == kInputStreamObjectId;
 	}
 
 	AudioClassID ClassForObject(AudioObjectID objectId) noexcept
@@ -1013,8 +1015,7 @@ namespace
 			case kAudioDevicePropertyDeviceIsRunning:
 			case kAudioDevicePropertyDeviceIsRunningSomewhere:
 				return CopyScalar<UInt32>(
-					DeviceObjectCount() > 0 && gRunningClientCount.load() > 0
-							&& gUsbTransport.IsStarted()
+					DeviceObjectCount() > 0 && gRunningClientCount.load() > 0 && gUsbTransport.IsStarted()
 						? 1u
 						: 0u,
 					inDataSize, outDataSize, outData);
@@ -1185,10 +1186,14 @@ namespace
 			return kAudioHardwareNotReadyError;
 		}
 
-		const UInt32 oldClientCount = gRunningClientCount.fetch_add(1);
+		std::lock_guard<std::mutex> ioLock(gIOMutex);
+		const UInt32 oldClientCount =
+			gRunningClientCount.load(std::memory_order_acquire);
+		if (oldClientCount == std::numeric_limits<UInt32>::max())
+			return kAudioHardwareIllegalOperationError;
+
 		if (oldClientCount == 0 && !gUsbTransport.Start())
 		{
-			gRunningClientCount.fetch_sub(1);
 			os_log_error(OS_LOG_DEFAULT,
 						 "AKAI EIE Pro HAL StartIO failed: USB transport not ready");
 			return kAudioHardwareNotReadyError;
@@ -1198,6 +1203,8 @@ namespace
 			gStartHostTime.store(mach_absolute_time(), std::memory_order_release);
 			gClockSeed.fetch_add(1, std::memory_order_acq_rel);
 		}
+		gRunningClientCount.store(oldClientCount + 1,
+								  std::memory_order_release);
 
 		os_log(OS_LOG_DEFAULT,
 			   "AKAI EIE Pro HAL StartIO client %{public}u",
@@ -1212,15 +1219,23 @@ namespace
 		if (deviceObjectId != kDeviceObjectId)
 			return kAudioHardwareBadObjectError;
 
-		UInt32 oldCount = gRunningClientCount.load();
-		while (oldCount > 0 && !gRunningClientCount.compare_exchange_weak(oldCount, oldCount - 1))
-		{
-		}
+		std::lock_guard<std::mutex> ioLock(gIOMutex);
+		const UInt32 oldCount =
+			gRunningClientCount.load(std::memory_order_acquire);
+		if (oldCount == 0)
+			return kAudioHardwareIllegalOperationError;
+
 		if (oldCount == 1)
 		{
 			gUsbTransport.Stop();
+			gRunningClientCount.store(0, std::memory_order_release);
 			gStartHostTime.store(0, std::memory_order_release);
 			gClockSeed.fetch_add(1, std::memory_order_acq_rel);
+		}
+		else
+		{
+			gRunningClientCount.store(oldCount - 1,
+									  std::memory_order_release);
 		}
 
 		os_log(OS_LOG_DEFAULT,

@@ -40,6 +40,7 @@ namespace akai_eie_hal
 		constexpr std::uint32_t kIsoSubmitAttemptCount = 4;
 		constexpr std::uint32_t kMaxConsecutivePlaybackErrors = 3;
 		constexpr std::uint32_t kMaxConsecutiveEmptySyncPackets = 64;
+		constexpr std::size_t kSilenceRampFrameCount = 128;
 		constexpr std::chrono::milliseconds kStartTimeout{12000};
 		constexpr std::chrono::milliseconds kRestartBackoff{250};
 
@@ -128,6 +129,35 @@ namespace akai_eie_hal
 			}
 
 			return 0;
+		}
+
+		std::int32_t ReadS24LE(const std::uint8_t *frame) noexcept
+		{
+			std::uint32_t value =
+				static_cast<std::uint32_t>(frame[0]) | (static_cast<std::uint32_t>(frame[1]) << 8) | (static_cast<std::uint32_t>(frame[2]) << 16);
+			if ((value & 0x00800000u) != 0)
+				value |= 0xff000000u;
+			return static_cast<std::int32_t>(value);
+		}
+
+		void WriteS24LE(std::int32_t sample, std::uint8_t *frame) noexcept
+		{
+			const std::uint32_t value =
+				static_cast<std::uint32_t>(sample) & 0x00ffffffu;
+			frame[0] = static_cast<std::uint8_t>(value & 0xffu);
+			frame[1] = static_cast<std::uint8_t>((value >> 8) & 0xffu);
+			frame[2] = static_cast<std::uint8_t>((value >> 16) & 0xffu);
+		}
+
+		std::int32_t ScaleS24(std::int32_t sample, std::size_t numerator,
+							  std::size_t denominator) noexcept
+		{
+			if (denominator == 0 || numerator == denominator)
+				return sample;
+			if (numerator == 0)
+				return 0;
+			return static_cast<std::int32_t>(
+				(static_cast<std::int64_t>(sample) * static_cast<std::int64_t>(numerator)) / static_cast<std::int64_t>(denominator));
 		}
 
 		bool SetMatchingNumber(CFMutableDictionaryRef dictionary, const char *key,
@@ -321,6 +351,9 @@ namespace akai_eie_hal
 		std::uint32_t consecutiveEmptySyncPacketCount = 0;
 		bool syncFeedbackDisabled = false;
 		bool syncFeedbackEmptyLogged = false;
+		std::array<std::int32_t, akai_eie::kPlaybackChannelCount>
+			lastPlaybackSamples{};
+		bool outputWasSilent = true;
 
 		std::mutex runLoopMutex;
 		CFRunLoopRef workerRunLoop = nullptr;
@@ -1314,6 +1347,72 @@ namespace akai_eie_hal
 		return result == kIOReturnSuccess;
 	}
 
+	void AkaiEieUsbTransport::RememberLastPlaybackFrame(
+		const std::uint8_t *frames, std::size_t frameCount) noexcept
+	{
+		if (frames == nullptr || frameCount == 0)
+			return;
+
+		const std::uint8_t *lastFrame =
+			frames + (frameCount - 1) * akai_eie::kPlaybackBytesPerFrame;
+		for (std::size_t channel = 0; channel < akai_eie::kPlaybackChannelCount; ++channel)
+		{
+			impl_->lastPlaybackSamples[channel] =
+				ReadS24LE(lastFrame + channel * 3);
+		}
+	}
+
+	void AkaiEieUsbTransport::FadeInFromSilence(
+		std::uint8_t *frames, std::size_t frameCount) noexcept
+	{
+		if (frames == nullptr || frameCount == 0)
+			return;
+
+		const std::size_t rampFrames =
+			std::min(frameCount, kSilenceRampFrameCount);
+		for (std::size_t frame = 0; frame < rampFrames; ++frame)
+		{
+			const std::size_t numerator = frame + 1;
+			for (std::size_t channel = 0; channel < akai_eie::kPlaybackChannelCount; ++channel)
+			{
+				std::uint8_t *sample =
+					frames + frame * akai_eie::kPlaybackBytesPerFrame + channel * 3;
+				WriteS24LE(ScaleS24(ReadS24LE(sample), numerator, rampFrames),
+						   sample);
+			}
+		}
+	}
+
+	void AkaiEieUsbTransport::FadeOutToSilence(
+		std::uint8_t *frames, std::size_t frameCount) noexcept
+	{
+		if (frames == nullptr || frameCount == 0)
+			return;
+
+		const std::size_t rampFrames =
+			std::min(frameCount, kSilenceRampFrameCount);
+		for (std::size_t frame = 0; frame < rampFrames; ++frame)
+		{
+			const std::size_t numerator = rampFrames - frame - 1;
+			for (std::size_t channel = 0; channel < akai_eie::kPlaybackChannelCount; ++channel)
+			{
+				std::uint8_t *sample =
+					frames + frame * akai_eie::kPlaybackBytesPerFrame + channel * 3;
+				WriteS24LE(ScaleS24(impl_->lastPlaybackSamples[channel],
+									numerator, rampFrames),
+						   sample);
+			}
+		}
+
+		if (rampFrames < frameCount)
+		{
+			std::memset(frames + rampFrames * akai_eie::kPlaybackBytesPerFrame,
+						0,
+						(frameCount - rampFrames) * akai_eie::kPlaybackBytesPerFrame);
+		}
+		impl_->lastPlaybackSamples.fill(0);
+	}
+
 	std::size_t AkaiEieUsbTransport::BufferedOutputFrames() noexcept
 	{
 		std::lock_guard<std::mutex> lock(impl_->outputMutex);
@@ -1380,8 +1479,17 @@ namespace akai_eie_hal
 		// Pad any remaining requested frames with silence
 		if (copied < frameCount)
 		{
-			std::memset(outFrames + copied * akai_eie::kPlaybackBytesPerFrame,
-						0, (frameCount - copied) * akai_eie::kPlaybackBytesPerFrame);
+			FadeOutToSilence(
+				outFrames + copied * akai_eie::kPlaybackBytesPerFrame,
+				frameCount - copied);
+			impl_->outputWasSilent = true;
+		}
+		else if (copied > 0)
+		{
+			if (impl_->outputWasSilent)
+				FadeInFromSilence(outFrames, copied);
+			RememberLastPlaybackFrame(outFrames, copied);
+			impl_->outputWasSilent = false;
 		}
 
 		return copied;
@@ -1406,6 +1514,8 @@ namespace akai_eie_hal
 		impl_->consecutiveEmptySyncPacketCount = 0;
 		impl_->syncFeedbackDisabled = false;
 		impl_->syncFeedbackEmptyLogged = false;
+		impl_->lastPlaybackSamples.fill(0);
+		impl_->outputWasSilent = true;
 		impl_->syncFeedbackFrames.store(0, std::memory_order_release);
 	}
 

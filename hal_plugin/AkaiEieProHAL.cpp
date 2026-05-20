@@ -28,7 +28,8 @@ namespace
 	constexpr UInt32 kChannelCount = 4;
 	constexpr UInt32 kBytesPerSample = sizeof(Float32);
 	constexpr UInt32 kBufferFrameSize = 512;
-	constexpr UInt32 kClockSeed = 1;
+	// This is a clock anchor cadence, not the CoreAudio IO buffer size.
+	constexpr UInt32 kZeroTimeStampPeriod = 12000;
 
 	constexpr const char *kBundleId = "com.interslice.akai-eie-pro";
 	constexpr const char *kDeviceName = "AKAI EIE Pro";
@@ -43,6 +44,7 @@ namespace
 	std::atomic<UInt32> gRunningClientCount{0};
 	AudioServerPlugInHostRef gHost = nullptr;
 	std::atomic<UInt64> gStartHostTime{0};
+	std::atomic<UInt64> gClockSeed{1};
 	std::atomic<bool> gUsbDevicePresent{false};
 	IONotificationPortRef gUsbNotificationPort = nullptr;
 	dispatch_queue_t gUsbNotificationQueue = nullptr;
@@ -132,6 +134,8 @@ namespace
 		{
 			gUsbTransport.Stop();
 			gRunningClientCount.store(0, std::memory_order_release);
+			gStartHostTime.store(0, std::memory_order_release);
+			gClockSeed.fetch_add(1, std::memory_order_acq_rel);
 		}
 
 		if (gHost == nullptr)
@@ -145,19 +149,6 @@ namespace
 		};
 		gHost->PropertiesChanged(gHost, kAudioObjectPlugInObject,
 								 static_cast<UInt32>(std::size(pluginAddresses)), pluginAddresses);
-
-		const AudioObjectPropertyAddress deviceAddresses[] = {
-			{kAudioDevicePropertyDeviceIsAlive, kAudioObjectPropertyScopeGlobal,
-			 kAudioObjectPropertyElementMain},
-			{kAudioDevicePropertyIsHidden, kAudioObjectPropertyScopeGlobal,
-			 kAudioObjectPropertyElementMain},
-			{kAudioDevicePropertyDeviceIsRunning,
-			 kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain},
-			{kAudioDevicePropertyDeviceIsRunningSomewhere,
-			 kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain},
-		};
-		gHost->PropertiesChanged(gHost, kDeviceObjectId,
-								 static_cast<UInt32>(std::size(deviceAddresses)), deviceAddresses);
 	}
 
 	void UpdateUsbDevicePresence(bool notify) noexcept
@@ -291,7 +282,13 @@ namespace
 
 	bool IsKnownObject(AudioObjectID objectId) noexcept
 	{
-		return objectId == kAudioObjectPlugInObject || objectId == kDeviceObjectId || objectId == kOutputStreamObjectId || objectId == kInputStreamObjectId;
+		if (objectId == kAudioObjectPlugInObject)
+			return true;
+		if (DeviceObjectCount() == 0)
+			return false;
+		return objectId == kDeviceObjectId
+			   || objectId == kOutputStreamObjectId
+			   || objectId == kInputStreamObjectId;
 	}
 
 	AudioClassID ClassForObject(AudioObjectID objectId) noexcept
@@ -587,6 +584,8 @@ namespace
 		case kAudioObjectPropertyControlList:
 		case kAudioDevicePropertySafetyOffset:
 		case kAudioDevicePropertyZeroTimeStampPeriod:
+		case kAudioDevicePropertyClockAlgorithm:
+		case kAudioDevicePropertyClockIsStable:
 		case kAudioDevicePropertyNominalSampleRate:
 		case kAudioDevicePropertyActualSampleRate:
 		case kAudioDevicePropertyAvailableNominalSampleRates:
@@ -1015,6 +1014,7 @@ namespace
 			case kAudioDevicePropertyDeviceIsRunningSomewhere:
 				return CopyScalar<UInt32>(
 					DeviceObjectCount() > 0 && gRunningClientCount.load() > 0
+							&& gUsbTransport.IsStarted()
 						? 1u
 						: 0u,
 					inDataSize, outDataSize, outData);
@@ -1035,8 +1035,13 @@ namespace
 			case kAudioDevicePropertyUsesVariableBufferFrameSizes:
 				return CopyScalar<UInt32>(0, inDataSize, outDataSize, outData);
 			case kAudioDevicePropertyZeroTimeStampPeriod:
-				return CopyScalar<UInt32>(kBufferFrameSize, inDataSize,
+				return CopyScalar<UInt32>(kZeroTimeStampPeriod, inDataSize,
 										  outDataSize, outData);
+			case kAudioDevicePropertyClockAlgorithm:
+				return CopyScalar<UInt32>(kAudioDeviceClockAlgorithmRaw,
+										  inDataSize, outDataSize, outData);
+			case kAudioDevicePropertyClockIsStable:
+				return CopyScalar<UInt32>(1, inDataSize, outDataSize, outData);
 			case kAudioDevicePropertyStreams:
 			{
 				const UInt32 streamCount = DeviceStreamList(address, nullptr, 0);
@@ -1188,6 +1193,11 @@ namespace
 						 "AKAI EIE Pro HAL StartIO failed: USB transport not ready");
 			return kAudioHardwareNotReadyError;
 		}
+		if (oldClientCount == 0)
+		{
+			gStartHostTime.store(mach_absolute_time(), std::memory_order_release);
+			gClockSeed.fetch_add(1, std::memory_order_acq_rel);
+		}
 
 		os_log(OS_LOG_DEFAULT,
 			   "AKAI EIE Pro HAL StartIO client %{public}u",
@@ -1207,7 +1217,11 @@ namespace
 		{
 		}
 		if (oldCount == 1)
+		{
 			gUsbTransport.Stop();
+			gStartHostTime.store(0, std::memory_order_release);
+			gClockSeed.fetch_add(1, std::memory_order_acq_rel);
+		}
 
 		os_log(OS_LOG_DEFAULT,
 			   "AKAI EIE Pro HAL StopIO client %{public}u",
@@ -1239,8 +1253,9 @@ namespace
 		const Float64 rawSampleTime =
 			(elapsedNanos / 1000000000.0) * kSampleRate;
 		const UInt64 cycleCount =
-			static_cast<UInt64>(rawSampleTime) / kBufferFrameSize;
-		const UInt64 cycleSampleTime = cycleCount * kBufferFrameSize;
+			static_cast<UInt64>(rawSampleTime) / kZeroTimeStampPeriod;
+		const UInt64 cycleSampleTime =
+			cycleCount * kZeroTimeStampPeriod;
 		const Float64 cycleSeconds =
 			static_cast<Float64>(cycleSampleTime) / kSampleRate;
 		const UInt64 cycleNanos =
@@ -1250,7 +1265,7 @@ namespace
 
 		*outSampleTime = static_cast<Float64>(cycleSampleTime);
 		*outHostTime = startHostTime + cycleTicks;
-		*outSeed = kClockSeed;
+		*outSeed = gClockSeed.load(std::memory_order_acquire);
 		return kAudioHardwareNoError;
 	}
 

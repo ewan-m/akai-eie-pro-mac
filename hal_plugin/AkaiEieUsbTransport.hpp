@@ -39,6 +39,7 @@ namespace akai_eie_hal
 		bool StartPlaybackTransfers() noexcept;
 		bool SubmitSyncTransfer(std::size_t transferIndex) noexcept;
 		bool SubmitPlaybackTransfer(std::size_t transferIndex) noexcept;
+		void RequestRestart(const char *reason) noexcept;
 		void HandleSyncComplete(std::size_t transferIndex, IOReturn result) noexcept;
 		void HandlePlaybackComplete(std::size_t transferIndex, IOReturn result) noexcept;
 		bool ReadCurrentUsbFrame(std::uint64_t *outFrame) noexcept;
@@ -58,6 +59,7 @@ namespace akai_eie_hal
 
 		std::atomic<bool> started_{false};
 		std::atomic<bool> stopRequested_{false};
+		std::atomic<bool> restartRequested_{false};
 		std::atomic<std::uint32_t> inFlightTransfers_{0};
 
 		std::mutex startMutex_;

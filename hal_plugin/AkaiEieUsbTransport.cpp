@@ -27,7 +27,7 @@ namespace akai_eie_hal
 		constexpr std::size_t kOutputReprimeFrameCount = kSampleRateHz / 100;
 		constexpr std::size_t kOutputLowWaterFrameCount = kSampleRateHz / 40;
 		constexpr std::size_t kOutputHighWaterFrameCount = kSampleRateHz / 5;
-		constexpr std::size_t kPlaybackTransferCount = 4;
+		constexpr std::size_t kPlaybackTransferCount = 6;
 		constexpr std::size_t kSyncTransferCount = 2;
 		constexpr std::size_t kMaxSyncPacketBytes = 64;
 		constexpr std::uint32_t kPlaybackIsoPacketCount =
@@ -35,7 +35,12 @@ namespace akai_eie_hal
 		constexpr std::uint32_t kMaxPlaybackFramesPerTransfer = 480;
 		constexpr std::size_t kMaxPlaybackTransferBytes =
 			kMaxPlaybackFramesPerTransfer * akai_eie::kPlaybackBytesPerFrame;
-		constexpr std::uint64_t kUsbScheduleLeadBusFrames = 8;
+		constexpr std::uint64_t kUsbScheduleLeadBusFrames = 16;
+		constexpr std::uint64_t kUsbScheduleRecoveryLeadBusFrames = 24;
+		constexpr std::uint32_t kIsoSubmitAttemptCount = 4;
+		constexpr std::uint32_t kMaxConsecutivePlaybackErrors = 3;
+		constexpr std::chrono::milliseconds kStartTimeout{12000};
+		constexpr std::chrono::milliseconds kRestartBackoff{250};
 
 		std::uint64_t PlaybackTransferDurationBusFrames(
 			std::uint32_t frameListMicros) noexcept
@@ -74,6 +79,59 @@ namespace akai_eie_hal
 			default:
 				return "error";
 			}
+		}
+
+		bool IsPlausibleStandardSyncFeedback(
+			std::uint32_t framesPerMillisecond) noexcept
+		{
+			constexpr std::uint32_t kNominalFramesPerMillisecond =
+				kSampleRateHz / 1000;
+			constexpr std::uint32_t kToleranceFrames = 8;
+			return framesPerMillisecond >= kNominalFramesPerMillisecond - kToleranceFrames
+				   && framesPerMillisecond <= kNominalFramesPerMillisecond + kToleranceFrames
+				   && framesPerMillisecond < 50;
+		}
+
+		std::uint32_t DecodeSyncFeedbackFrames(
+			const std::uint8_t *buffer, std::uint16_t actualBytes) noexcept
+		{
+			if (buffer == nullptr || actualBytes == 0)
+				return 0;
+
+			// The EIE Pro reports a custom one-byte elapsed-frame count; accept
+			// standard USB Audio fixed-point feedback as a fallback.
+			const std::uint8_t akaiFrames = buffer[0];
+			if (akai_eie::IsReasonableSyncFeedback(akaiFrames))
+				return akaiFrames;
+
+			if (actualBytes >= 3)
+			{
+				const std::uint32_t raw10_14 =
+					static_cast<std::uint32_t>(buffer[0])
+					| (static_cast<std::uint32_t>(buffer[1]) << 8)
+					| (static_cast<std::uint32_t>(buffer[2]) << 16);
+				const std::uint32_t frames =
+					(raw10_14 + (1u << 13)) >> 14;
+				if (IsPlausibleStandardSyncFeedback(frames))
+					return frames;
+			}
+
+			if (actualBytes >= 4)
+			{
+				const std::uint32_t raw16_16 =
+					static_cast<std::uint32_t>(buffer[0])
+					| (static_cast<std::uint32_t>(buffer[1]) << 8)
+					| (static_cast<std::uint32_t>(buffer[2]) << 16)
+					| (static_cast<std::uint32_t>(buffer[3]) << 24);
+				const std::uint32_t frames = static_cast<std::uint32_t>(
+					((static_cast<std::uint64_t>(raw16_16) * 8u)
+					 + (1u << 15))
+					>> 16);
+				if (IsPlausibleStandardSyncFeedback(frames))
+					return frames;
+			}
+
+			return 0;
 		}
 
 		bool SetMatchingNumber(CFMutableDictionaryRef dictionary, const char *key,
@@ -262,6 +320,8 @@ namespace akai_eie_hal
 		std::uint64_t rebufferCount = 0;
 		std::uint64_t droppedFrameCount = 0;
 		std::uint64_t syncErrorCount = 0;
+		std::uint64_t playbackCompletionErrorCount = 0;
+		std::uint32_t consecutivePlaybackErrorCount = 0;
 
 		std::mutex runLoopMutex;
 		CFRunLoopRef workerRunLoop = nullptr;
@@ -309,6 +369,7 @@ namespace akai_eie_hal
 
 		ResetOutputRing();
 		stopRequested_.store(false);
+		restartRequested_.store(false);
 		inFlightTransfers_.store(0);
 		startCompleted_ = false;
 		startSucceeded_ = false;
@@ -324,8 +385,17 @@ namespace akai_eie_hal
 			return false;
 		}
 
-		startCondition_.wait(lock, [this]() noexcept
-							 { return startCompleted_; });
+		const bool completed = startCondition_.wait_for(lock, kStartTimeout,
+														[this]() noexcept
+														{ return startCompleted_; });
+		if (!completed)
+		{
+			os_log_error(OS_LOG_DEFAULT,
+						 "AKAI EIE Pro USB: worker start timed out");
+			lock.unlock();
+			Stop();
+			return false;
+		}
 
 		const bool ok = startSucceeded_;
 		lock.unlock();
@@ -340,6 +410,7 @@ namespace akai_eie_hal
 			return;
 
 		stopRequested_.store(true);
+		restartRequested_.store(false);
 
 		CFRunLoopRef runLoop = nullptr;
 		{
@@ -413,43 +484,111 @@ namespace akai_eie_hal
 			if (impl_->syncInterface != nullptr && impl_->syncPipe != 0)
 				(*impl_->syncInterface)->AbortPipe(impl_->syncInterface, impl_->syncPipe);
 		};
-		auto drainInFlightTransfers = [this]() noexcept
+		auto clearSubmittedTransfers = [this]() noexcept
 		{
-			const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+			for (auto &transfer : impl_->playbackTransfers)
+				transfer.submitted = false;
+			for (auto &transfer : impl_->syncTransfers)
+				transfer.submitted = false;
+			inFlightTransfers_.store(0);
+		};
+		auto drainInFlightTransfers = [this, &clearSubmittedTransfers]() noexcept
+		{
+			const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
 			while (inFlightTransfers_.load() > 0 && std::chrono::steady_clock::now() < deadline)
 			{
 				CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.005, true);
 			}
+			const std::uint32_t remaining = inFlightTransfers_.load();
+			if (remaining > 0)
+			{
+				os_log_error(OS_LOG_DEFAULT,
+							 "AKAI EIE Pro USB: timed out waiting for %{public}u transfers",
+							 remaining);
+				clearSubmittedTransfers();
+				stopRequested_.store(true);
+				return false;
+			}
+			return true;
 		};
-
-		const bool usbOpen = OpenUsb();
-		const bool open =
-			usbOpen && StartSyncTransfers() && StartPlaybackTransfers();
-		if (!open && usbOpen)
+		auto publishStartResult = [this](bool open) noexcept
 		{
-			abortActivePipes();
-			drainInFlightTransfers();
-		}
+			bool shouldNotify = false;
+			{
+				std::lock_guard<std::mutex> lock(startMutex_);
+				if (!startCompleted_)
+				{
+					startSucceeded_ = open;
+					startCompleted_ = true;
+					shouldNotify = true;
+				}
+			}
+			if (shouldNotify)
+				startCondition_.notify_all();
+		};
+		auto startResultPublished = [this]() noexcept
 		{
 			std::lock_guard<std::mutex> lock(startMutex_);
-			startSucceeded_ = open;
-			startCompleted_ = true;
-		}
-		startCondition_.notify_all();
-
-		if (open)
+			return startCompleted_;
+		};
+		auto waitBeforeRetry = [this]() noexcept
 		{
+			const auto deadline = std::chrono::steady_clock::now() + kRestartBackoff;
+			while (!stopRequested_.load() && std::chrono::steady_clock::now() < deadline)
+				std::this_thread::sleep_for(std::chrono::milliseconds(25));
+		};
+
+		while (!stopRequested_.load())
+		{
+			restartRequested_.store(false);
+
+			const bool usbOpen = OpenUsb();
+			const bool open =
+				usbOpen && StartSyncTransfers() && StartPlaybackTransfers();
+			if (!open)
+			{
+				if (usbOpen)
+				{
+					abortActivePipes();
+					if (!drainInFlightTransfers())
+					{
+						CloseUsb();
+						break;
+					}
+				}
+				CloseUsb();
+				if (!startResultPublished())
+				{
+					publishStartResult(false);
+					break;
+				}
+				waitBeforeRetry();
+				continue;
+			}
+
 			started_.store(true);
-			while (!stopRequested_.load())
+			publishStartResult(true);
+			while (!stopRequested_.load() && !restartRequested_.load())
 			{
 				CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.002, true);
 			}
 
+			started_.store(false);
 			abortActivePipes();
-			drainInFlightTransfers();
+			const bool drained = drainInFlightTransfers();
+			CloseUsb();
+			if (!drained)
+				break;
+
+			if (!restartRequested_.load() || stopRequested_.load())
+				break;
+
+			ResetOutputRing();
+			waitBeforeRetry();
 		}
 
 		started_.store(false);
+		publishStartResult(false);
 		CloseUsb();
 
 		{
@@ -818,34 +957,59 @@ namespace akai_eie_hal
 								  transfer.buffer.size()));
 		transfer.frame.frActCount = 0;
 
-		std::uint64_t currentFrame = 0;
-		const bool haveCurrentFrame = ReadCurrentDataUsbFrame(&currentFrame);
-		if (haveCurrentFrame && impl_->syncNextFrameStart < currentFrame + kUsbScheduleLeadBusFrames)
+		IOReturn lastResult = kIOReturnSuccess;
+		std::uint64_t lastFrameStart = 0;
+		std::uint64_t lastCurrentFrame = 0;
+		bool lastHaveCurrentFrame = false;
+		for (std::uint32_t attempt = 0; attempt < kIsoSubmitAttemptCount; ++attempt)
 		{
-			impl_->syncNextFrameStart =
-				currentFrame + kUsbScheduleLeadBusFrames;
-		}
+			std::uint64_t currentFrame = 0;
+			const bool haveCurrentFrame = ReadCurrentDataUsbFrame(&currentFrame);
+			if (haveCurrentFrame && impl_->syncNextFrameStart < currentFrame + kUsbScheduleLeadBusFrames)
+			{
+				impl_->syncNextFrameStart =
+					currentFrame + kUsbScheduleLeadBusFrames;
+			}
 
-		const std::uint64_t frameStart = impl_->syncNextFrameStart;
-		++impl_->syncNextFrameStart;
+			const std::uint64_t frameStart = impl_->syncNextFrameStart;
+			++impl_->syncNextFrameStart;
+			lastFrameStart = frameStart;
+			lastCurrentFrame = currentFrame;
+			lastHaveCurrentFrame = haveCurrentFrame;
 
-		transfer.submitted = true;
-		inFlightTransfers_.fetch_add(1);
-		const IOReturn result = (*impl_->syncInterface)->ReadIsochPipeAsync(impl_->syncInterface, impl_->syncPipe, transfer.buffer.data(), frameStart, 1, &transfer.frame, &AkaiEieUsbTransport::SyncComplete, &transfer);
-		if (result != kIOReturnSuccess)
-		{
+			transfer.submitted = true;
+			inFlightTransfers_.fetch_add(1);
+			lastResult = (*impl_->syncInterface)->ReadIsochPipeAsync(impl_->syncInterface, impl_->syncPipe, transfer.buffer.data(), frameStart, 1, &transfer.frame, &AkaiEieUsbTransport::SyncComplete, &transfer);
+			if (lastResult == kIOReturnSuccess)
+				return true;
+
 			transfer.submitted = false;
 			inFlightTransfers_.fetch_sub(1);
+			if (lastResult == kIOReturnIsoTooOld
+				|| lastResult == kIOReturnIsoTooNew)
+			{
+				if (ReadCurrentDataUsbFrame(&currentFrame))
+					impl_->syncNextFrameStart =
+						currentFrame + kUsbScheduleRecoveryLeadBusFrames;
+				continue;
+			}
+
 			os_log_error(OS_LOG_DEFAULT,
 						 "AKAI EIE Pro USB: sync read submit failed %{public}s (%{public}#x) start=%{public}llu current=%{public}llu",
-						 IOReturnName(result), result,
-						 static_cast<unsigned long long>(frameStart),
+						 IOReturnName(lastResult), lastResult,
+						 static_cast<unsigned long long>(lastFrameStart),
 						 static_cast<unsigned long long>(
-							 haveCurrentFrame ? currentFrame : 0));
+							 lastHaveCurrentFrame ? lastCurrentFrame : 0));
 			return false;
 		}
 
-		return true;
+		os_log_error(OS_LOG_DEFAULT,
+					 "AKAI EIE Pro USB: sync read submit failed %{public}s (%{public}#x) start=%{public}llu current=%{public}llu",
+					 IOReturnName(lastResult), lastResult,
+					 static_cast<unsigned long long>(lastFrameStart),
+					 static_cast<unsigned long long>(
+						 lastHaveCurrentFrame ? lastCurrentFrame : 0));
+		return false;
 	}
 
 	bool AkaiEieUsbTransport::SubmitPlaybackTransfer(
@@ -906,7 +1070,7 @@ namespace akai_eie_hal
 
 		const std::uint64_t transferDurationBusFrames =
 			PlaybackTransferDurationBusFrames(impl_->frameListMicros);
-		for (std::uint32_t attempt = 0; attempt < 2; ++attempt)
+		for (std::uint32_t attempt = 0; attempt < kIsoSubmitAttemptCount; ++attempt)
 		{
 			std::uint64_t currentFrame = 0;
 			const bool haveCurrentFrame = ReadCurrentUsbFrame(&currentFrame);
@@ -929,13 +1093,12 @@ namespace akai_eie_hal
 			transfer.submitted = false;
 			inFlightTransfers_.fetch_sub(1);
 			impl_->nextFrameStart = oldNextFrameStart;
-			if (attempt == 0
-				&& (result == kIOReturnIsoTooOld
-					|| result == kIOReturnIsoTooNew))
+			if (result == kIOReturnIsoTooOld
+				|| result == kIOReturnIsoTooNew)
 			{
 				if (ReadCurrentUsbFrame(&currentFrame))
 					impl_->nextFrameStart =
-						currentFrame + kUsbScheduleLeadBusFrames;
+						currentFrame + kUsbScheduleRecoveryLeadBusFrames;
 				continue;
 			}
 
@@ -951,6 +1114,34 @@ namespace akai_eie_hal
 
 		return false;
 	}
+
+	void AkaiEieUsbTransport::RequestRestart(const char *reason) noexcept
+	{
+		if (stopRequested_.load())
+			return;
+
+		const bool wasRequested = restartRequested_.exchange(true);
+		if (!wasRequested)
+		{
+			os_log_error(OS_LOG_DEFAULT,
+						 "AKAI EIE Pro USB: requesting transport restart: %{public}s",
+						 reason == nullptr ? "unspecified" : reason);
+		}
+
+		CFRunLoopRef runLoop = nullptr;
+		{
+			std::lock_guard<std::mutex> lock(impl_->runLoopMutex);
+			runLoop = impl_->workerRunLoop;
+			if (runLoop != nullptr)
+				CFRetain(runLoop);
+		}
+		if (runLoop != nullptr)
+		{
+			CFRunLoopStop(runLoop);
+			CFRelease(runLoop);
+		}
+	}
+
 	void AkaiEieUsbTransport::HandleSyncComplete(std::size_t transferIndex,
 												 IOReturn result) noexcept
 	{
@@ -958,19 +1149,34 @@ namespace akai_eie_hal
 			return;
 
 		auto &transfer = impl_->syncTransfers[transferIndex];
-		transfer.submitted = false;
-		inFlightTransfers_.fetch_sub(1);
+		if (transfer.submitted)
+		{
+			transfer.submitted = false;
+			inFlightTransfers_.fetch_sub(1);
+		}
+		else if (!stopRequested_.load())
+		{
+			os_log_error(OS_LOG_DEFAULT,
+						 "AKAI EIE Pro USB: unexpected sync completion %{public}zu",
+						 transferIndex);
+			return;
+		}
+		else
+		{
+			return;
+		}
 
 		if (result == kIOReturnSuccess && transfer.frame.frStatus == kIOReturnSuccess && transfer.frame.frActCount > 0)
 		{
-			const std::uint8_t framesElapsed = transfer.buffer[0];
-			if (akai_eie::IsReasonableSyncFeedback(framesElapsed))
+			const std::uint32_t framesElapsed = DecodeSyncFeedbackFrames(
+				transfer.buffer.data(), transfer.frame.frActCount);
+			if (framesElapsed > 0)
 			{
 				impl_->syncFeedbackFrames.fetch_add(
 					framesElapsed, std::memory_order_acq_rel);
 			}
 		}
-		else if (!stopRequested_.load())
+		else if (!stopRequested_.load() && !restartRequested_.load())
 		{
 			++impl_->syncErrorCount;
 			if (impl_->syncErrorCount <= 5)
@@ -982,8 +1188,11 @@ namespace akai_eie_hal
 			}
 		}
 
-		if (!stopRequested_.load())
-			SubmitSyncTransfer(transferIndex);
+		if (!stopRequested_.load() && !restartRequested_.load()
+			&& !SubmitSyncTransfer(transferIndex))
+		{
+			RequestRestart("sync transfer resubmit failed");
+		}
 	}
 
 	void AkaiEieUsbTransport::HandlePlaybackComplete(std::size_t transferIndex,
@@ -993,21 +1202,72 @@ namespace akai_eie_hal
 			return;
 
 		auto &transfer = impl_->playbackTransfers[transferIndex];
-		transfer.submitted = false;
-		inFlightTransfers_.fetch_sub(1);
-
-		if (result != kIOReturnSuccess && !stopRequested_.load())
+		if (transfer.submitted)
+		{
+			transfer.submitted = false;
+			inFlightTransfers_.fetch_sub(1);
+		}
+		else if (!stopRequested_.load())
 		{
 			os_log_error(OS_LOG_DEFAULT,
-						 "AKAI EIE Pro USB: isoch write completion failed %{public}s (%{public}#x)",
-						 IOReturnName(result), result);
+						 "AKAI EIE Pro USB: unexpected playback completion %{public}zu",
+						 transferIndex);
+			return;
+		}
+		else
+		{
+			return;
 		}
 
-		if (!stopRequested_.load() && !SubmitPlaybackTransfer(transferIndex))
+		bool completionError = result != kIOReturnSuccess;
+		IOReturn firstFrameStatus = kIOReturnSuccess;
+		if (result == kIOReturnSuccess)
 		{
-			os_log_error(OS_LOG_DEFAULT,
-						 "AKAI EIE Pro USB: playback transfer %{public}zu stopped after resubmit failure",
-						 transferIndex);
+			for (const auto &frame : transfer.frames)
+			{
+				if (frame.frStatus != kIOReturnSuccess)
+				{
+					completionError = true;
+					firstFrameStatus = frame.frStatus;
+					break;
+				}
+			}
+		}
+
+		if (completionError && !stopRequested_.load() && !restartRequested_.load())
+		{
+			++impl_->playbackCompletionErrorCount;
+			++impl_->consecutivePlaybackErrorCount;
+			if (impl_->playbackCompletionErrorCount <= 8)
+			{
+				if (result != kIOReturnSuccess)
+				{
+					os_log_error(OS_LOG_DEFAULT,
+								 "AKAI EIE Pro USB: isoch write completion failed %{public}s (%{public}#x)",
+								 IOReturnName(result), result);
+				}
+				else
+				{
+					os_log_error(OS_LOG_DEFAULT,
+								 "AKAI EIE Pro USB: isoch frame completion failed %{public}s (%{public}#x)",
+								 IOReturnName(firstFrameStatus), firstFrameStatus);
+				}
+			}
+			if (impl_->consecutivePlaybackErrorCount >= kMaxConsecutivePlaybackErrors)
+			{
+				RequestRestart("repeated playback completion errors");
+				return;
+			}
+		}
+		else if (!completionError)
+		{
+			impl_->consecutivePlaybackErrorCount = 0;
+		}
+
+		if (!stopRequested_.load() && !restartRequested_.load()
+			&& !SubmitPlaybackTransfer(transferIndex))
+		{
+			RequestRestart("playback transfer resubmit failed");
 		}
 	}
 
@@ -1115,6 +1375,8 @@ namespace akai_eie_hal
 		impl_->rebufferCount = 0;
 		impl_->droppedFrameCount = 0;
 		impl_->syncErrorCount = 0;
+		impl_->playbackCompletionErrorCount = 0;
+		impl_->consecutivePlaybackErrorCount = 0;
 		impl_->syncFeedbackFrames.store(0, std::memory_order_release);
 	}
 

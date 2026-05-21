@@ -21,7 +21,16 @@ transport:
 - output I/O: converts interleaved Float32 to AKAI 4-channel S24_3LE wire
   frames and queues them to the playback isochronous OUT endpoint
 - playback pacing: a bounded fractional-accumulator servo adjusts transfer
-  frame counts from output-ring fill error instead of using sync feedback
+  frame counts from filtered output-ring fill error instead of using sync
+  feedback, with a deadband to avoid chasing short-term host scheduling jitter
+- playback lookahead: keeps 8 transfers in flight, about 40 ms at the expected
+  5 ms transfer cadence
+- playback telemetry: reports buffer servo state plus late USB scheduling,
+  submit retries, completion errors, and bad isochronous packet statuses
+- sync feedback endpoint: detected for diagnostics but not scheduled because
+  playback pacing is derived from output-ring fill level
+- capture bulk reads: start on demand when CoreAudio reads input, using two
+  16 KiB transfers to reduce callback pressure
 
 The original 10.14-era AKAI HAL used the old CoreAudio plug-in ABI and talked
 to a Ploytec kernel service rather than owning raw USB scheduling itself. This

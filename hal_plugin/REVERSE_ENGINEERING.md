@@ -56,8 +56,14 @@ Implemented alignment in this project:
 - Exposes a mutable buffer frame size property.
 - Exposes CoreAudio element names for input and USB output channels.
 - Starts both playback isochronous output and bulk capture input.
-- Uses output-ring fill level as the playback clock servo error signal, with a
-  fractional accumulator for sub-frame rate corrections.
+- Uses filtered output-ring fill level as the playback clock servo error signal,
+  with a deadband and fractional accumulator for sub-frame rate corrections.
+- Limits playback isochronous lookahead to 8 transfers so future transfers are
+  less likely to be filled with underrun padding before CoreAudio refills.
+- Does not schedule the empty sync-feedback endpoint; the pipe is still detected
+  and logged for diagnostics.
+- Starts two larger capture bulk reads on demand when CoreAudio reads input,
+  avoiding playback-only bulk traffic.
 
 Not yet implemented:
 

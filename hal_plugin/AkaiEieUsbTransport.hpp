@@ -53,6 +53,9 @@ namespace akai_eie_hal
 		std::size_t BufferedOutputFrames() noexcept;
 		std::uint32_t CalculatePlaybackFramesWanted(
 			std::size_t bufferedOutputFrames) noexcept;
+		void RecordPlaybackStats(std::uint32_t framesWanted,
+								 std::size_t bufferedOutputFrames,
+								 std::size_t copiedFrames) noexcept;
 		void PushCaptureUsbFrames(const std::uint8_t *usbFrames,
 								  std::size_t byteCount) noexcept;
 		void RememberLastPlaybackFrame(const std::uint8_t *frames,
@@ -79,6 +82,7 @@ namespace akai_eie_hal
 		std::atomic<bool> started_{false};
 		std::atomic<bool> stopRequested_{false};
 		std::atomic<bool> restartRequested_{false};
+		std::atomic<bool> captureRequested_{false};
 		std::atomic<std::uint32_t> inFlightTransfers_{0};
 
 		std::mutex startMutex_;

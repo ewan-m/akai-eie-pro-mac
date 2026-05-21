@@ -56,6 +56,8 @@ Implemented alignment in this project:
 - Exposes a mutable buffer frame size property.
 - Exposes CoreAudio element names for input and USB output channels.
 - Starts both playback isochronous output and bulk capture input.
+- Uses output-ring fill level as the playback clock servo error signal, with a
+  fractional accumulator for sub-frame rate corrections.
 
 Not yet implemented:
 

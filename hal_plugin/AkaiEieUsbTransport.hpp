@@ -51,6 +51,8 @@ namespace akai_eie_hal
 		bool ReadCurrentDataUsbFrame(std::uint64_t *outFrame) noexcept;
 		std::uint32_t SampleRateHz() const noexcept;
 		std::size_t BufferedOutputFrames() noexcept;
+		std::uint32_t CalculatePlaybackFramesWanted(
+			std::size_t bufferedOutputFrames) noexcept;
 		void PushCaptureUsbFrames(const std::uint8_t *usbFrames,
 								  std::size_t byteCount) noexcept;
 		void RememberLastPlaybackFrame(const std::uint8_t *frames,

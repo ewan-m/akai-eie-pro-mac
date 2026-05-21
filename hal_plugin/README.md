@@ -20,6 +20,8 @@ transport:
 - input I/O: decodes the EIE bulk capture endpoint into interleaved Float32
 - output I/O: converts interleaved Float32 to AKAI 4-channel S24_3LE wire
   frames and queues them to the playback isochronous OUT endpoint
+- playback pacing: a bounded fractional-accumulator servo adjusts transfer
+  frame counts from output-ring fill error instead of using sync feedback
 
 The original 10.14-era AKAI HAL used the old CoreAudio plug-in ABI and talked
 to a Ploytec kernel service rather than owning raw USB scheduling itself. This

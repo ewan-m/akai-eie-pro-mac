@@ -25,9 +25,10 @@ namespace akai_eie_hal
 		AkaiEieUsbTransport(const AkaiEieUsbTransport &) = delete;
 		AkaiEieUsbTransport &operator=(const AkaiEieUsbTransport &) = delete;
 
-		bool Start() noexcept;
+		bool Start(std::uint32_t sampleRateHz) noexcept;
 		void Stop() noexcept;
 		void EnqueueOutput(const Float32 *interleaved, std::uint32_t frameCount) noexcept;
+		std::uint32_t DequeueInput(Float32 *interleaved, std::uint32_t frameCount) noexcept;
 
 		bool IsStarted() const noexcept { return started_.load(); }
 
@@ -37,14 +38,21 @@ namespace akai_eie_hal
 		void CloseUsb() noexcept;
 		bool StartSyncTransfers() noexcept;
 		bool StartPlaybackTransfers() noexcept;
+		bool StartCaptureTransfers() noexcept;
 		bool SubmitSyncTransfer(std::size_t transferIndex) noexcept;
 		bool SubmitPlaybackTransfer(std::size_t transferIndex) noexcept;
+		bool SubmitCaptureTransfer(std::size_t transferIndex) noexcept;
 		void RequestRestart(const char *reason) noexcept;
 		void HandleSyncComplete(std::size_t transferIndex, IOReturn result) noexcept;
 		void HandlePlaybackComplete(std::size_t transferIndex, IOReturn result) noexcept;
+		void HandleCaptureComplete(std::size_t transferIndex, IOReturn result,
+								   std::uint32_t actualBytes) noexcept;
 		bool ReadCurrentUsbFrame(std::uint64_t *outFrame) noexcept;
 		bool ReadCurrentDataUsbFrame(std::uint64_t *outFrame) noexcept;
+		std::uint32_t SampleRateHz() const noexcept;
 		std::size_t BufferedOutputFrames() noexcept;
+		void PushCaptureUsbFrames(const std::uint8_t *usbFrames,
+								  std::size_t byteCount) noexcept;
 		void RememberLastPlaybackFrame(const std::uint8_t *frames,
 									   std::size_t frameCount) noexcept;
 		void FadeInFromSilence(std::uint8_t *frames,
@@ -54,11 +62,14 @@ namespace akai_eie_hal
 		std::size_t PopOutputFrames(std::uint8_t *outFrames,
 									std::size_t frameCount) noexcept;
 		void ResetOutputRing() noexcept;
+		void ResetInputRing() noexcept;
 
 		static void SyncComplete(void *refcon, IOReturn result,
 								 void *arg0) noexcept;
 		static void PlaybackComplete(void *refcon, IOReturn result,
 									 void *arg0) noexcept;
+		static void CaptureComplete(void *refcon, IOReturn result,
+									void *arg0) noexcept;
 
 		struct Impl;
 		Impl *impl_ = nullptr;

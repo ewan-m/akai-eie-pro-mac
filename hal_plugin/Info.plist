@@ -8,7 +8,7 @@
 	<key>CFBundleExecutable</key>
 	<string>AkaiEieProHAL</string>
 	<key>CFBundleIdentifier</key>
-	<string>com.interslice.akai-eie-pro</string>
+	<string>com.akai.eie.hal</string>
 	<key>CFBundleInfoDictionaryVersion</key>
 	<string>6.0</string>
 	<key>CFBundleName</key>
@@ -16,11 +16,11 @@
 	<key>CFBundlePackageType</key>
 	<string>BNDL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>0.1.0</string>
+	<string>3.3.17.1</string>
 	<key>CFBundleSignature</key>
 	<string>????</string>
 	<key>CFBundleVersion</key>
-	<string>1</string>
+	<string>3.3.17.1</string>
 	<key>CFPlugInFactories</key>
 	<dict>
 		<key>8E3D1F3F-4E9A-4B6D-B08D-18B3B0900424</key>

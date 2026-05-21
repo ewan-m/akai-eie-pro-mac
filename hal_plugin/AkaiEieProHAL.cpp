@@ -8,6 +8,7 @@
 #include <os/log.h>
 
 #include <atomic>
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -26,21 +27,29 @@ namespace
 	constexpr AudioObjectID kOutputStreamObjectId = 3;
 	constexpr AudioObjectID kInputStreamObjectId = 4;
 
-	constexpr Float64 kSampleRate = 48000.0;
+	constexpr UInt32 kDefaultSampleRateHz = 48000;
 	constexpr UInt32 kChannelCount = 4;
 	constexpr UInt32 kBytesPerSample = sizeof(Float32);
-	constexpr UInt32 kBufferFrameSize = 512;
-	// This is a clock anchor cadence, not the CoreAudio IO buffer size.
-	constexpr UInt32 kZeroTimeStampPeriod = 12000;
+	constexpr UInt32 kDefaultBufferFrameSize = 512;
+	constexpr UInt32 kMinBufferFrameSize = 64;
+	constexpr UInt32 kMaxBufferFrameSize = 2048;
+	constexpr UInt32 kClockAnchorCadenceDivisor = 4;
+	constexpr std::array<UInt32, 4> kSupportedSampleRatesHz{
+		44100, 48000, 88200, 96000};
 
-	constexpr const char *kBundleId = "com.interslice.akai-eie-pro";
+	constexpr const char *kBundleId = "com.akai.eie.hal";
 	constexpr const char *kDeviceName = "AKAI EIE Pro";
 	constexpr const char *kManufacturerName = "Akai Professional";
-	constexpr const char *kModelUid = "com.interslice.akai-eie-pro.model";
-	constexpr const char *kDeviceUid =
-		"com.interslice.akai-eie-pro.usb-09e8-0010";
+	constexpr const char *kModelUid = "com.akai.eie.model";
+	constexpr const char *kDeviceUid = "com.akai.eie.usb-09e8-0010";
 	constexpr const char *kOutputStreamName = "AKAI EIE Pro Output";
 	constexpr const char *kInputStreamName = "AKAI EIE Pro Input";
+	constexpr std::array<const char *, kChannelCount> kInputChannelNames{
+		"Input 1", "Input 2", "Input 3", "Input 4"};
+	constexpr std::array<const char *, kChannelCount> kOutputChannelNames{
+		"USB 1", "USB 2", "USB 3", "USB 4"};
+	constexpr std::array<const char *, kChannelCount> kChannelNumberNames{
+		"1", "2", "3", "4"};
 
 	std::atomic<UInt32> gRefCount{1};
 	std::atomic<UInt32> gRunningClientCount{0};
@@ -48,6 +57,8 @@ namespace
 	AudioServerPlugInHostRef gHost = nullptr;
 	std::atomic<UInt64> gStartHostTime{0};
 	std::atomic<UInt64> gClockSeed{1};
+	std::atomic<UInt32> gSampleRateHz{kDefaultSampleRateHz};
+	std::atomic<UInt32> gBufferFrameSize{kDefaultBufferFrameSize};
 	std::atomic<bool> gUsbDevicePresent{false};
 	IONotificationPortRef gUsbNotificationPort = nullptr;
 	dispatch_queue_t gUsbNotificationQueue = nullptr;
@@ -58,6 +69,38 @@ namespace
 	akai_eie_hal::AkaiEieUsbTransport gUsbTransport;
 
 	extern AudioServerPlugInDriverInterface *gDriverInterfacePtr;
+
+	UInt32 CurrentSampleRateHz() noexcept
+	{
+		return gSampleRateHz.load(std::memory_order_acquire);
+	}
+
+	Float64 CurrentSampleRate() noexcept
+	{
+		return static_cast<Float64>(CurrentSampleRateHz());
+	}
+
+	UInt32 CurrentBufferFrameSize() noexcept
+	{
+		return gBufferFrameSize.load(std::memory_order_acquire);
+	}
+
+	UInt32 ZeroTimeStampPeriod() noexcept
+	{
+		const UInt32 sampleRateHz = CurrentSampleRateHz();
+		return sampleRateHz / kClockAnchorCadenceDivisor;
+	}
+
+	bool IsSupportedSampleRateHz(UInt32 sampleRateHz) noexcept
+	{
+		return akai_eie::IsSupportedSampleRate(sampleRateHz);
+	}
+
+	bool IsSupportedBufferFrameSize(UInt32 frameSize) noexcept
+	{
+		return frameSize >= kMinBufferFrameSize &&
+			   frameSize <= kMaxBufferFrameSize;
+	}
 
 	bool SetMatchingNumber(CFMutableDictionaryRef dictionary, const char *key,
 						   UInt16 value) noexcept
@@ -274,6 +317,55 @@ namespace
 		return address->mScope == kAudioObjectPropertyScopeOutput || address->mScope == kAudioObjectPropertyScopeWildcard;
 	}
 
+	bool IsChannelElement(AudioObjectPropertyElement element) noexcept
+	{
+		return element >= 1 && element <= kChannelCount;
+	}
+
+	bool IsChannelNameProperty(
+		const AudioObjectPropertyAddress *address) noexcept
+	{
+		if (address == nullptr || !IsChannelElement(address->mElement))
+			return false;
+		if (address->mScope != kAudioObjectPropertyScopeInput &&
+			address->mScope != kAudioObjectPropertyScopeOutput)
+		{
+			return false;
+		}
+
+		switch (address->mSelector)
+		{
+		case kAudioObjectPropertyElementName:
+		case kAudioObjectPropertyElementCategoryName:
+		case kAudioObjectPropertyElementNumberName:
+			return true;
+		default:
+			return false;
+		}
+	}
+
+	const char *ChannelElementName(
+		const AudioObjectPropertyAddress *address) noexcept
+	{
+		const std::size_t index = address->mElement - 1;
+		return address->mScope == kAudioObjectPropertyScopeInput
+				   ? kInputChannelNames[index]
+				   : kOutputChannelNames[index];
+	}
+
+	const char *ChannelCategoryName(
+		const AudioObjectPropertyAddress *address) noexcept
+	{
+		return address->mScope == kAudioObjectPropertyScopeInput ? "Input"
+																 : "Output";
+	}
+
+	const char *ChannelNumberName(
+		const AudioObjectPropertyAddress *address) noexcept
+	{
+		return kChannelNumberNames[address->mElement - 1];
+	}
+
 	bool IncludesInputScope(const AudioObjectPropertyAddress *address) noexcept
 	{
 		return address->mScope == kAudioObjectPropertyScopeInput || address->mScope == kAudioObjectPropertyScopeGlobal || address->mScope == kAudioObjectPropertyScopeWildcard;
@@ -448,10 +540,11 @@ namespace
 		return count;
 	}
 
-	AudioStreamBasicDescription StreamFormat() noexcept
+	AudioStreamBasicDescription StreamFormat(UInt32 sampleRateHz =
+												 CurrentSampleRateHz()) noexcept
 	{
 		AudioStreamBasicDescription format{};
-		format.mSampleRate = kSampleRate;
+		format.mSampleRate = static_cast<Float64>(sampleRateHz);
 		format.mFormatID = kAudioFormatLinearPCM;
 		format.mFormatFlags = kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked | kAudioFormatFlagsNativeEndian;
 		format.mBytesPerPacket = kChannelCount * kBytesPerSample;
@@ -462,13 +555,183 @@ namespace
 		return format;
 	}
 
-	AudioStreamRangedDescription StreamRangedDescription() noexcept
+	AudioStreamRangedDescription StreamRangedDescription(
+		UInt32 sampleRateHz = CurrentSampleRateHz()) noexcept
 	{
 		AudioStreamRangedDescription description{};
-		description.mFormat = StreamFormat();
-		description.mSampleRateRange.mMinimum = kSampleRate;
-		description.mSampleRateRange.mMaximum = kSampleRate;
+		description.mFormat = StreamFormat(sampleRateHz);
+		description.mSampleRateRange.mMinimum =
+			static_cast<Float64>(sampleRateHz);
+		description.mSampleRateRange.mMaximum =
+			static_cast<Float64>(sampleRateHz);
 		return description;
+	}
+
+	OSStatus CopyAvailableSampleRates(UInt32 inDataSize, UInt32 *outDataSize,
+									  void *outData) noexcept
+	{
+		const UInt32 bytes = static_cast<UInt32>(
+			kSupportedSampleRatesHz.size() * sizeof(AudioValueRange));
+		if (outDataSize == nullptr || outData == nullptr || inDataSize < bytes)
+			return kAudioHardwareBadPropertySizeError;
+
+		auto *ranges = static_cast<AudioValueRange *>(outData);
+		for (std::size_t i = 0; i < kSupportedSampleRatesHz.size(); ++i)
+		{
+			const Float64 sampleRate =
+				static_cast<Float64>(kSupportedSampleRatesHz[i]);
+			ranges[i].mMinimum = sampleRate;
+			ranges[i].mMaximum = sampleRate;
+		}
+
+		*outDataSize = bytes;
+		return kAudioHardwareNoError;
+	}
+
+	OSStatus CopyAvailableStreamFormats(UInt32 inDataSize,
+										UInt32 *outDataSize,
+										void *outData) noexcept
+	{
+		const UInt32 bytes = static_cast<UInt32>(
+			kSupportedSampleRatesHz.size() * sizeof(AudioStreamRangedDescription));
+		if (outDataSize == nullptr || outData == nullptr || inDataSize < bytes)
+			return kAudioHardwareBadPropertySizeError;
+
+		auto *descriptions =
+			static_cast<AudioStreamRangedDescription *>(outData);
+		for (std::size_t i = 0; i < kSupportedSampleRatesHz.size(); ++i)
+			descriptions[i] = StreamRangedDescription(kSupportedSampleRatesHz[i]);
+
+		*outDataSize = bytes;
+		return kAudioHardwareNoError;
+	}
+
+	void NotifySampleRateChanged() noexcept
+	{
+		if (gHost == nullptr)
+			return;
+
+		const AudioObjectPropertyAddress deviceAddresses[] = {
+			{kAudioDevicePropertyNominalSampleRate,
+			 kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain},
+			{kAudioDevicePropertyActualSampleRate,
+			 kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain},
+			{kAudioDevicePropertyZeroTimeStampPeriod,
+			 kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain},
+		};
+		gHost->PropertiesChanged(gHost, kDeviceObjectId,
+								 static_cast<UInt32>(std::size(deviceAddresses)),
+								 deviceAddresses);
+
+		const AudioObjectPropertyAddress streamAddresses[] = {
+			{kAudioStreamPropertyVirtualFormat, kAudioObjectPropertyScopeGlobal,
+			 kAudioObjectPropertyElementMain},
+			{kAudioStreamPropertyPhysicalFormat, kAudioObjectPropertyScopeGlobal,
+			 kAudioObjectPropertyElementMain},
+		};
+		gHost->PropertiesChanged(gHost, kOutputStreamObjectId,
+								 static_cast<UInt32>(std::size(streamAddresses)),
+								 streamAddresses);
+		gHost->PropertiesChanged(gHost, kInputStreamObjectId,
+								 static_cast<UInt32>(std::size(streamAddresses)),
+								 streamAddresses);
+	}
+
+	void NotifyBufferFrameSizeChanged() noexcept
+	{
+		if (gHost == nullptr)
+			return;
+
+		const AudioObjectPropertyAddress addresses[] = {
+			{kAudioDevicePropertyBufferFrameSize,
+			 kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain},
+			{kAudioDevicePropertyStreamConfiguration,
+			 kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain},
+		};
+		gHost->PropertiesChanged(gHost, kDeviceObjectId,
+								 static_cast<UInt32>(std::size(addresses)),
+								 addresses);
+	}
+
+	OSStatus SetSampleRateHz(UInt32 sampleRateHz) noexcept
+	{
+		if (!IsSupportedSampleRateHz(sampleRateHz))
+			return kAudioHardwareIllegalOperationError;
+
+		const UInt32 oldSampleRateHz =
+			gSampleRateHz.load(std::memory_order_acquire);
+		if (oldSampleRateHz == sampleRateHz)
+			return kAudioHardwareNoError;
+
+		OSStatus status = kAudioHardwareNoError;
+		{
+			std::lock_guard<std::mutex> ioLock(gIOMutex);
+			const UInt32 runningClientCount =
+				gRunningClientCount.load(std::memory_order_acquire);
+			const bool wasRunning =
+				runningClientCount > 0 && gUsbTransport.IsStarted();
+
+			if (wasRunning)
+				gUsbTransport.Stop();
+
+			gSampleRateHz.store(sampleRateHz, std::memory_order_release);
+			gStartHostTime.store(
+				wasRunning ? mach_absolute_time() : 0,
+				std::memory_order_release);
+			gClockSeed.fetch_add(1, std::memory_order_acq_rel);
+
+			if (wasRunning && !gUsbTransport.Start(sampleRateHz))
+			{
+				gSampleRateHz.store(oldSampleRateHz,
+									std::memory_order_release);
+				gStartHostTime.store(mach_absolute_time(),
+									 std::memory_order_release);
+				gClockSeed.fetch_add(1, std::memory_order_acq_rel);
+				if (!gUsbTransport.Start(oldSampleRateHz))
+				{
+					gRunningClientCount.store(0, std::memory_order_release);
+					gStartHostTime.store(0, std::memory_order_release);
+				}
+				status = kAudioHardwareNotReadyError;
+			}
+		}
+
+		if (status == kAudioHardwareNoError)
+			NotifySampleRateChanged();
+		return status;
+	}
+
+	OSStatus SetBufferFrameSize(UInt32 frameSize) noexcept
+	{
+		if (!IsSupportedBufferFrameSize(frameSize))
+			return kAudioHardwareIllegalOperationError;
+
+		const UInt32 oldFrameSize =
+			gBufferFrameSize.exchange(frameSize, std::memory_order_acq_rel);
+		if (oldFrameSize == frameSize)
+			return kAudioHardwareNoError;
+
+		NotifyBufferFrameSizeChanged();
+		return kAudioHardwareNoError;
+	}
+
+	bool IsCompatibleStreamFormat(
+		const AudioStreamBasicDescription &format) noexcept
+	{
+		const UInt32 sampleRateHz =
+			static_cast<UInt32>(format.mSampleRate + 0.5);
+		return format.mSampleRate > 0.0 &&
+			   format.mSampleRate ==
+				   static_cast<Float64>(sampleRateHz) &&
+			   IsSupportedSampleRateHz(sampleRateHz) &&
+			   format.mFormatID == kAudioFormatLinearPCM &&
+			   (format.mFormatFlags & kAudioFormatFlagIsFloat) != 0 &&
+			   (format.mFormatFlags & kAudioFormatFlagIsPacked) != 0 &&
+			   format.mFramesPerPacket == 1 &&
+			   format.mBytesPerPacket == kChannelCount * kBytesPerSample &&
+			   format.mBytesPerFrame == kChannelCount * kBytesPerSample &&
+			   format.mChannelsPerFrame == kChannelCount &&
+			   format.mBitsPerChannel == 8 * kBytesPerSample;
 	}
 
 	std::size_t AudioBufferListSize(UInt32 bufferCount) noexcept
@@ -502,7 +765,7 @@ namespace
 		{
 			bufferList->mBuffers[i].mNumberChannels = kChannelCount;
 			bufferList->mBuffers[i].mDataByteSize =
-				kBufferFrameSize * kChannelCount * kBytesPerSample;
+				CurrentBufferFrameSize() * kChannelCount * kBytesPerSample;
 			bufferList->mBuffers[i].mData = nullptr;
 		}
 
@@ -565,6 +828,8 @@ namespace
 
 	bool HasDeviceProperty(const AudioObjectPropertyAddress *address) noexcept
 	{
+		if (IsChannelNameProperty(address))
+			return true;
 		if (!IsMainElement(address))
 			return false;
 
@@ -676,12 +941,17 @@ namespace
 			{
 			case kAudioDevicePropertyDeviceUID:
 			case kAudioDevicePropertyModelUID:
+			case kAudioObjectPropertyElementName:
+			case kAudioObjectPropertyElementCategoryName:
+			case kAudioObjectPropertyElementNumberName:
 				return sizeof(CFStringRef);
 			case kAudioDevicePropertyStreams:
 				return DeviceStreamList(address, nullptr, 0) * static_cast<UInt32>(sizeof(AudioObjectID));
 			case kAudioObjectPropertyControlList:
 				return 0;
 			case kAudioDevicePropertyAvailableNominalSampleRates:
+				return static_cast<UInt32>(
+					kSupportedSampleRatesHz.size() * sizeof(AudioValueRange));
 			case kAudioDevicePropertyBufferFrameSizeRange:
 				return sizeof(AudioValueRange);
 			case kAudioDevicePropertyPreferredChannelsForStereo:
@@ -712,7 +982,9 @@ namespace
 				return sizeof(AudioStreamBasicDescription);
 			case kAudioStreamPropertyAvailableVirtualFormats:
 			case kAudioStreamPropertyAvailablePhysicalFormats:
-				return sizeof(AudioStreamRangedDescription);
+				return static_cast<UInt32>(
+					kSupportedSampleRatesHz.size() *
+					sizeof(AudioStreamRangedDescription));
 			default:
 				return sizeof(UInt32);
 			}
@@ -862,7 +1134,14 @@ namespace
 		if (!HasProperty(driver, objectId, clientProcessId, address))
 			return kAudioHardwareUnknownPropertyError;
 
-		*outIsSettable = false;
+		*outIsSettable =
+			(objectId == kDeviceObjectId &&
+			 (address->mSelector == kAudioDevicePropertyNominalSampleRate ||
+			  address->mSelector == kAudioDevicePropertyBufferFrameSize)) ||
+			((objectId == kOutputStreamObjectId ||
+			  objectId == kInputStreamObjectId) &&
+			 (address->mSelector == kAudioStreamPropertyVirtualFormat ||
+			  address->mSelector == kAudioStreamPropertyPhysicalFormat));
 		return kAudioHardwareNoError;
 	}
 
@@ -999,6 +1278,15 @@ namespace
 				return CopyCFString(kDeviceUid, inDataSize, outDataSize, outData);
 			case kAudioDevicePropertyModelUID:
 				return CopyCFString(kModelUid, inDataSize, outDataSize, outData);
+			case kAudioObjectPropertyElementName:
+				return CopyCFString(ChannelElementName(address), inDataSize,
+									outDataSize, outData);
+			case kAudioObjectPropertyElementCategoryName:
+				return CopyCFString(ChannelCategoryName(address), inDataSize,
+									outDataSize, outData);
+			case kAudioObjectPropertyElementNumberName:
+				return CopyCFString(ChannelNumberName(address), inDataSize,
+									outDataSize, outData);
 			case kAudioDevicePropertyTransportType:
 				return CopyScalar<UInt32>(kAudioDeviceTransportTypeUSB,
 										  inDataSize, outDataSize, outData);
@@ -1036,7 +1324,7 @@ namespace
 			case kAudioDevicePropertyUsesVariableBufferFrameSizes:
 				return CopyScalar<UInt32>(0, inDataSize, outDataSize, outData);
 			case kAudioDevicePropertyZeroTimeStampPeriod:
-				return CopyScalar<UInt32>(kZeroTimeStampPeriod, inDataSize,
+				return CopyScalar<UInt32>(ZeroTimeStampPeriod(), inDataSize,
 										  outDataSize, outData);
 			case kAudioDevicePropertyClockAlgorithm:
 				return CopyScalar<UInt32>(kAudioDeviceClockAlgorithmRaw,
@@ -1063,14 +1351,11 @@ namespace
 				return kAudioHardwareNoError;
 			case kAudioDevicePropertyNominalSampleRate:
 			case kAudioDevicePropertyActualSampleRate:
-				return CopyScalar<Float64>(kSampleRate, inDataSize, outDataSize,
-										   outData);
+				return CopyScalar<Float64>(CurrentSampleRate(), inDataSize,
+										   outDataSize, outData);
 			case kAudioDevicePropertyAvailableNominalSampleRates:
-			{
-				AudioValueRange range{kSampleRate, kSampleRate};
-				return CopyScalar<AudioValueRange>(range, inDataSize,
-												   outDataSize, outData);
-			}
+				return CopyAvailableSampleRates(inDataSize, outDataSize,
+												outData);
 			case kAudioDevicePropertyPreferredChannelsForStereo:
 			{
 				if (outDataSize == nullptr || outData == nullptr || inDataSize < 2 * sizeof(UInt32))
@@ -1090,13 +1375,13 @@ namespace
 													  outDataSize, outData);
 			}
 			case kAudioDevicePropertyBufferFrameSize:
-				return CopyScalar<UInt32>(kBufferFrameSize, inDataSize,
+				return CopyScalar<UInt32>(CurrentBufferFrameSize(), inDataSize,
 										  outDataSize, outData);
 			case kAudioDevicePropertyBufferFrameSizeRange:
 			{
 				AudioValueRange range{
-					static_cast<Float64>(kBufferFrameSize),
-					static_cast<Float64>(kBufferFrameSize),
+					static_cast<Float64>(kMinBufferFrameSize),
+					static_cast<Float64>(kMaxBufferFrameSize),
 				};
 				return CopyScalar<AudioValueRange>(range, inDataSize,
 												   outDataSize, outData);
@@ -1142,12 +1427,8 @@ namespace
 			}
 			case kAudioStreamPropertyAvailableVirtualFormats:
 			case kAudioStreamPropertyAvailablePhysicalFormats:
-			{
-				const AudioStreamRangedDescription description =
-					StreamRangedDescription();
-				return CopyScalar<AudioStreamRangedDescription>(description,
-																inDataSize, outDataSize, outData);
-			}
+				return CopyAvailableStreamFormats(inDataSize, outDataSize,
+												  outData);
 			default:
 				break;
 			}
@@ -1163,11 +1444,67 @@ namespace
 	{
 		(void)qualifierDataSize;
 		(void)qualifierData;
-		(void)inDataSize;
-		(void)inData;
 
 		if (!HasProperty(driver, objectId, clientProcessId, address))
 			return kAudioHardwareUnknownPropertyError;
+
+		if (inData == nullptr)
+			return kAudioHardwareBadPropertySizeError;
+
+		if (objectId == kDeviceObjectId)
+		{
+			switch (address->mSelector)
+			{
+			case kAudioDevicePropertyNominalSampleRate:
+			{
+				if (inDataSize < sizeof(Float64))
+					return kAudioHardwareBadPropertySizeError;
+				const Float64 requestedSampleRate =
+					*static_cast<const Float64 *>(inData);
+				const UInt32 sampleRateHz =
+					static_cast<UInt32>(requestedSampleRate + 0.5);
+				if (requestedSampleRate !=
+					static_cast<Float64>(sampleRateHz))
+				{
+					return kAudioHardwareIllegalOperationError;
+				}
+				return SetSampleRateHz(sampleRateHz);
+			}
+			case kAudioDevicePropertyBufferFrameSize:
+			{
+				if (inDataSize < sizeof(UInt32))
+					return kAudioHardwareBadPropertySizeError;
+				const UInt32 frameSize =
+					*static_cast<const UInt32 *>(inData);
+				return SetBufferFrameSize(frameSize);
+			}
+			default:
+				break;
+			}
+		}
+
+		if (objectId == kOutputStreamObjectId ||
+			objectId == kInputStreamObjectId)
+		{
+			switch (address->mSelector)
+			{
+			case kAudioStreamPropertyVirtualFormat:
+			case kAudioStreamPropertyPhysicalFormat:
+			{
+				if (inDataSize < sizeof(AudioStreamBasicDescription))
+					return kAudioHardwareBadPropertySizeError;
+				const auto &format =
+					*static_cast<const AudioStreamBasicDescription *>(inData);
+				if (!IsCompatibleStreamFormat(format))
+					return kAudioHardwareIllegalOperationError;
+				return SetSampleRateHz(
+					static_cast<UInt32>(format.mSampleRate + 0.5));
+			}
+			default:
+				break;
+			}
+		}
+
 		return kAudioHardwareIllegalOperationError;
 	}
 
@@ -1192,7 +1529,8 @@ namespace
 		if (oldClientCount == std::numeric_limits<UInt32>::max())
 			return kAudioHardwareIllegalOperationError;
 
-		if (oldClientCount == 0 && !gUsbTransport.Start())
+		if (oldClientCount == 0 &&
+			!gUsbTransport.Start(CurrentSampleRateHz()))
 		{
 			os_log_error(OS_LOG_DEFAULT,
 						 "AKAI EIE Pro HAL StartIO failed: USB transport not ready");
@@ -1265,14 +1603,16 @@ namespace
 		const UInt64 elapsedTicks = now - startHostTime;
 		const Float64 elapsedNanos =
 			static_cast<Float64>(elapsedTicks) * timebase.numer / timebase.denom;
+		const Float64 sampleRate = CurrentSampleRate();
+		const UInt32 zeroTimeStampPeriod = ZeroTimeStampPeriod();
 		const Float64 rawSampleTime =
-			(elapsedNanos / 1000000000.0) * kSampleRate;
+			(elapsedNanos / 1000000000.0) * sampleRate;
 		const UInt64 cycleCount =
-			static_cast<UInt64>(rawSampleTime) / kZeroTimeStampPeriod;
+			static_cast<UInt64>(rawSampleTime) / zeroTimeStampPeriod;
 		const UInt64 cycleSampleTime =
-			cycleCount * kZeroTimeStampPeriod;
+			cycleCount * zeroTimeStampPeriod;
 		const Float64 cycleSeconds =
-			static_cast<Float64>(cycleSampleTime) / kSampleRate;
+			static_cast<Float64>(cycleSampleTime) / sampleRate;
 		const UInt64 cycleNanos =
 			static_cast<UInt64>(cycleSeconds * 1000000000.0);
 		const UInt64 cycleTicks = static_cast<UInt64>(
@@ -1334,8 +1674,9 @@ namespace
 				return kAudioHardwareBadObjectError;
 			if (ioMainBuffer != nullptr)
 			{
-				std::memset(ioMainBuffer, 0,
-							static_cast<std::size_t>(ioBufferFrameSize) * kChannelCount * kBytesPerSample);
+				gUsbTransport.DequeueInput(
+					static_cast<Float32 *>(ioMainBuffer),
+					ioBufferFrameSize);
 			}
 			return kAudioHardwareNoError;
 		}

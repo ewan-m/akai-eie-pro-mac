@@ -12,6 +12,7 @@
 #include <chrono>
 #include <cstring>
 #include <new>
+#include <pthread.h>
 
 namespace akai_eie_hal
 {
@@ -27,7 +28,7 @@ namespace akai_eie_hal
 		constexpr std::size_t kOutputReprimeFrameCount = kOutputPrimeFrameCount;
 		constexpr std::size_t kOutputLowWaterFrameCount = kSampleRateHz / 40;
 		constexpr std::size_t kOutputHighWaterFrameCount = kSampleRateHz / 5;
-		constexpr std::size_t kPlaybackTransferCount = 6;
+		constexpr std::size_t kPlaybackTransferCount = 24;
 		constexpr std::size_t kSyncTransferCount = 2;
 		constexpr std::size_t kMaxSyncPacketBytes = 64;
 		constexpr std::uint32_t kPlaybackIsoPacketCount =
@@ -349,7 +350,7 @@ namespace akai_eie_hal
 		std::uint64_t playbackCompletionErrorCount = 0;
 		std::uint32_t consecutivePlaybackErrorCount = 0;
 		std::uint32_t consecutiveEmptySyncPacketCount = 0;
-		bool syncFeedbackDisabled = false;
+		bool syncFeedbackFallbackLogged = false;
 		bool syncFeedbackEmptyLogged = false;
 		std::array<std::int32_t, akai_eie::kPlaybackChannelCount>
 			lastPlaybackSamples{};
@@ -468,9 +469,7 @@ namespace akai_eie_hal
 											std::uint32_t frameCount) noexcept
 	{
 		if (impl_ == nullptr || interleaved == nullptr || frameCount == 0 || !started_.load())
-		{
 			return;
-		}
 
 		std::lock_guard<std::mutex> lock(impl_->outputMutex);
 		for (std::uint32_t frame = 0; frame < frameCount; ++frame)
@@ -502,6 +501,15 @@ namespace akai_eie_hal
 
 	void AkaiEieUsbTransport::WorkerMain() noexcept
 	{
+		const int qosResult =
+			pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
+		if (qosResult != 0)
+		{
+			os_log_error(OS_LOG_DEFAULT,
+						 "AKAI EIE Pro USB: failed to raise worker QoS %{public}d",
+						 qosResult);
+		}
+
 		CFRunLoopRef runLoop = CFRunLoopGetCurrent();
 		CFRetain(runLoop);
 		{
@@ -807,13 +815,13 @@ namespace akai_eie_hal
 						 "AKAI EIE Pro USB: playback isoch OUT pipe not found");
 			return false;
 		}
-		if (findPipe(impl_->dataInterface, kUSBIn, kUSBIsoc, false, 0, false,
+		if (findPipe(impl_->dataInterface, kUSBIn, kUSBIsoc, false, 0, true,
 					 &impl_->syncPipe, &impl_->syncMaxPacketSize))
 		{
 			impl_->syncInterface = impl_->dataInterface;
 		}
 		else if (findPipe(impl_->playInterface, kUSBIn, kUSBIsoc, false, 0,
-						  false, &impl_->syncPipe, &impl_->syncMaxPacketSize))
+						  true, &impl_->syncPipe, &impl_->syncMaxPacketSize))
 		{
 			impl_->syncInterface = impl_->playInterface;
 		}
@@ -894,10 +902,10 @@ namespace akai_eie_hal
 		}
 
 		os_log(OS_LOG_DEFAULT,
-			   "AKAI EIE Pro USB: opened playback pipe %{public}u maxPacket=%{public}u frameList=%{public}uus startFrame=%{public}llu syncPipe=%{public}u syncOnData=%{public}u capturePipe=%{public}u",
+			   "AKAI EIE Pro USB: opened playback pipe %{public}u maxPacket=%{public}u frameList=%{public}uus startFrame=%{public}llu syncPipe=%{public}u syncMaxPacket=%{public}u syncOnData=%{public}u capturePipe=%{public}u",
 			   impl_->playPipe, impl_->playMaxPacketSize, impl_->frameListMicros,
 			   static_cast<unsigned long long>(impl_->nextFrameStart),
-			   impl_->syncPipe,
+			   impl_->syncPipe, impl_->syncMaxPacketSize,
 			   impl_->syncInterface == impl_->dataInterface ? 1u : 0u,
 			   impl_->capturePipe);
 		return true;
@@ -976,7 +984,7 @@ namespace akai_eie_hal
 	bool AkaiEieUsbTransport::SubmitSyncTransfer(
 		std::size_t transferIndex) noexcept
 	{
-		if (impl_->syncInterface == nullptr || impl_->syncPipe == 0 || impl_->syncFeedbackDisabled || transferIndex >= impl_->syncTransfers.size() || stopRequested_.load())
+		if (impl_->syncInterface == nullptr || impl_->syncPipe == 0 || transferIndex >= impl_->syncTransfers.size() || stopRequested_.load())
 		{
 			return false;
 		}
@@ -1204,6 +1212,7 @@ namespace akai_eie_hal
 				impl_->syncFeedbackFrames.fetch_add(
 					framesElapsed, std::memory_order_acq_rel);
 				impl_->consecutiveEmptySyncPacketCount = 0;
+				impl_->syncFeedbackFallbackLogged = false;
 				acceptedSyncFeedback = true;
 			}
 		}
@@ -1219,12 +1228,12 @@ namespace akai_eie_hal
 				os_log(OS_LOG_DEFAULT,
 					   "AKAI EIE Pro USB: sync feedback endpoint returned empty packets; holding nominal playback timing");
 			}
-			if (!impl_->syncFeedbackDisabled && impl_->consecutiveEmptySyncPacketCount >= kMaxConsecutiveEmptySyncPackets)
+			if (!impl_->syncFeedbackFallbackLogged && impl_->consecutiveEmptySyncPacketCount >= kMaxConsecutiveEmptySyncPackets)
 			{
-				impl_->syncFeedbackDisabled = true;
+				impl_->syncFeedbackFallbackLogged = true;
 				impl_->syncFeedbackFrames.store(0, std::memory_order_release);
 				os_log(OS_LOG_DEFAULT,
-					   "AKAI EIE Pro USB: sync feedback disabled after %{public}u empty packets; using nominal playback timing",
+					   "AKAI EIE Pro USB: sync feedback still empty after %{public}u packets; continuing sync reads with nominal playback timing",
 					   impl_->consecutiveEmptySyncPacketCount);
 			}
 		}
@@ -1243,7 +1252,7 @@ namespace akai_eie_hal
 			}
 		}
 
-		if (!impl_->syncFeedbackDisabled && !stopRequested_.load() && !restartRequested_.load() && !SubmitSyncTransfer(transferIndex))
+		if (!stopRequested_.load() && !restartRequested_.load() && !SubmitSyncTransfer(transferIndex))
 		{
 			RequestRestart("sync transfer resubmit failed");
 		}
@@ -1441,14 +1450,6 @@ namespace akai_eie_hal
 				}
 			}
 
-			if (impl_->outputPrimed && impl_->outputFrameCount < frameCount)
-			{
-				impl_->outputPrimed = false;
-				impl_->outputReadFrame = 0;
-				impl_->outputWriteFrame = 0;
-				impl_->outputFrameCount = 0;
-			}
-
 			while (impl_->outputPrimed && copied < frameCount && impl_->outputFrameCount > 0)
 			{
 				const std::size_t contiguousAvailable =
@@ -1470,26 +1471,26 @@ namespace akai_eie_hal
 				copied += framesToCopy;
 			}
 
-			if (impl_->outputPrimed && copied < frameCount && impl_->outputFrameCount == 0)
+			if (impl_->outputPrimed && copied == 0 && impl_->outputFrameCount == 0)
 			{
 				impl_->outputPrimed = false;
 			}
 		}
 
-		// Pad any remaining requested frames with silence
+		if (copied > 0)
+		{
+			if (impl_->outputWasSilent)
+				FadeInFromSilence(outFrames, copied);
+			RememberLastPlaybackFrame(outFrames, copied);
+			impl_->outputWasSilent = false;
+		}
+
 		if (copied < frameCount)
 		{
 			FadeOutToSilence(
 				outFrames + copied * akai_eie::kPlaybackBytesPerFrame,
 				frameCount - copied);
 			impl_->outputWasSilent = true;
-		}
-		else if (copied > 0)
-		{
-			if (impl_->outputWasSilent)
-				FadeInFromSilence(outFrames, copied);
-			RememberLastPlaybackFrame(outFrames, copied);
-			impl_->outputWasSilent = false;
 		}
 
 		return copied;
@@ -1512,7 +1513,7 @@ namespace akai_eie_hal
 		impl_->playbackCompletionErrorCount = 0;
 		impl_->consecutivePlaybackErrorCount = 0;
 		impl_->consecutiveEmptySyncPacketCount = 0;
-		impl_->syncFeedbackDisabled = false;
+		impl_->syncFeedbackFallbackLogged = false;
 		impl_->syncFeedbackEmptyLogged = false;
 		impl_->lastPlaybackSamples.fill(0);
 		impl_->outputWasSilent = true;

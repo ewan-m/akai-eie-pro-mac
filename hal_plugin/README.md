@@ -19,14 +19,16 @@ transport:
 - `StopIO`: stops the USB worker and releases the device/interfaces
 - input I/O: decodes the EIE bulk capture endpoint into interleaved Float32
 - output I/O: converts interleaved Float32 to AKAI 4-channel S24_3LE wire
-  frames and queues them to the playback isochronous OUT endpoint
+  frames, queues them to the playback isochronous OUT endpoint, and zero-fills
+  only the missing tail of a short transfer instead of waiting for a prime gate
 - playback pacing: a bounded fractional-accumulator servo adjusts transfer
   frame counts from filtered output-ring fill error instead of using sync
   feedback, with a deadband to avoid chasing short-term host scheduling jitter
 - playback lookahead: keeps 8 transfers in flight, about 40 ms at the expected
   5 ms transfer cadence
 - playback telemetry: reports buffer servo state plus late USB scheduling,
-  submit retries, completion errors, and bad isochronous packet statuses
+  submit retries, completion errors, packet-size variation, CoreAudio producer
+  rate, source level/clipping, and bad isochronous packet statuses
 - sync feedback endpoint: detected for diagnostics but not scheduled because
   playback pacing is derived from output-ring fill level
 - capture bulk reads: start on demand when CoreAudio reads input, using two

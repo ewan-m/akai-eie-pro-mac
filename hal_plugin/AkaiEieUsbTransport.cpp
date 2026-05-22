@@ -44,7 +44,6 @@ namespace akai_eie_hal
 		constexpr std::uint32_t kMaxConsecutivePlaybackErrors = 3;
 		constexpr std::uint32_t kMaxConsecutiveCaptureErrors = 3;
 		constexpr std::uint32_t kMaxConsecutiveEmptySyncPackets = 64;
-		constexpr std::size_t kSilenceRampFrameCount = 128;
 		constexpr double kNominalPlaybackTransferSeconds = 0.005;
 		constexpr double kPlaybackServoFilterSeconds = 2.0;
 		constexpr double kPlaybackServoDeadbandFrames = 512.0;
@@ -53,20 +52,10 @@ namespace akai_eie_hal
 		constexpr std::chrono::milliseconds kStartTimeout{12000};
 		constexpr std::chrono::milliseconds kRestartBackoff{250};
 
-		std::size_t OutputPrimeFrameCount(std::uint32_t sampleRateHz) noexcept
-		{
-			return std::max<std::size_t>(1, sampleRateHz / 20);
-		}
-
-		std::size_t OutputReprimeFrameCount(std::uint32_t sampleRateHz) noexcept
-		{
-			return OutputPrimeFrameCount(sampleRateHz);
-		}
-
 		std::size_t OutputServoTargetFrameCount(
 			std::uint32_t sampleRateHz) noexcept
 		{
-			return OutputPrimeFrameCount(sampleRateHz);
+			return std::max<std::size_t>(1, sampleRateHz / 20);
 		}
 
 		double PlaybackTransferSeconds(std::uint32_t frameListMicros) noexcept
@@ -203,40 +192,11 @@ namespace akai_eie_hal
 			return 0;
 		}
 
-		std::int32_t ReadS24LE(const std::uint8_t *frame) noexcept
-		{
-			std::uint32_t value =
-				static_cast<std::uint32_t>(frame[0]) | (static_cast<std::uint32_t>(frame[1]) << 8) | (static_cast<std::uint32_t>(frame[2]) << 16);
-			if ((value & 0x00800000u) != 0)
-				value |= 0xff000000u;
-			return static_cast<std::int32_t>(value);
-		}
-
 		Float32 S24ToFloat32(std::int32_t sample) noexcept
 		{
 			return sample < 0
 					   ? static_cast<Float32>(sample / 8388608.0f)
 					   : static_cast<Float32>(sample / 8388607.0f);
-		}
-
-		void WriteS24LE(std::int32_t sample, std::uint8_t *frame) noexcept
-		{
-			const std::uint32_t value =
-				static_cast<std::uint32_t>(sample) & 0x00ffffffu;
-			frame[0] = static_cast<std::uint8_t>(value & 0xffu);
-			frame[1] = static_cast<std::uint8_t>((value >> 8) & 0xffu);
-			frame[2] = static_cast<std::uint8_t>((value >> 16) & 0xffu);
-		}
-
-		std::int32_t ScaleS24(std::int32_t sample, std::size_t numerator,
-							  std::size_t denominator) noexcept
-		{
-			if (denominator == 0 || numerator == denominator)
-				return sample;
-			if (numerator == 0)
-				return 0;
-			return static_cast<std::int32_t>(
-				(static_cast<std::int64_t>(sample) * static_cast<std::int64_t>(numerator)) / static_cast<std::int64_t>(denominator));
 		}
 
 		bool SetMatchingNumber(CFMutableDictionaryRef dictionary, const char *key,
@@ -430,10 +390,17 @@ namespace akai_eie_hal
 		std::size_t outputReadFrame = 0;
 		std::size_t outputWriteFrame = 0;
 		std::size_t outputFrameCount = 0;
-		bool outputPrimed = false;
 		std::uint64_t underrunCount = 0;
-		std::uint64_t rebufferCount = 0;
 		std::uint64_t droppedFrameCount = 0;
+		std::uint64_t enqueueStatsCallCount = 0;
+		std::uint64_t enqueueStatsFrameCount = 0;
+		std::uint32_t enqueueStatsMinFramesPerCall = 0;
+		std::uint32_t enqueueStatsMaxFramesPerCall = 0;
+		double enqueueStatsSampleSquareSum = 0.0;
+		std::uint64_t enqueueStatsSampleCount = 0;
+		double enqueueStatsPeakSample = 0.0;
+		std::uint64_t enqueueStatsClippedSampleCount = 0;
+		std::uint64_t enqueueStatsNonFiniteSampleCount = 0;
 		std::uint64_t syncErrorCount = 0;
 		std::uint64_t playbackCompletionErrorCount = 0;
 		std::uint32_t consecutivePlaybackErrorCount = 0;
@@ -455,13 +422,15 @@ namespace akai_eie_hal
 		std::uint64_t playbackStatsCaptureByteCount = 0;
 		std::uint32_t playbackStatsMinFrames = 0;
 		std::uint32_t playbackStatsMaxFrames = 0;
+		std::size_t playbackStatsMinBufferedFrames = 0;
+		std::size_t playbackStatsMaxBufferedFrames = 0;
 		std::size_t playbackStatsLastBufferedFrames = 0;
 		double playbackStatsLastFilteredFrames = 0.0;
+		std::uint64_t playbackStatsExactRateNudgeCount = 0;
+		std::uint16_t playbackStatsMinPacketBytes = 0;
+		std::uint16_t playbackStatsMaxPacketBytes = 0;
 		bool syncFeedbackFallbackLogged = false;
 		bool syncFeedbackEmptyLogged = false;
-		std::array<std::int32_t, akai_eie::kPlaybackChannelCount>
-			lastPlaybackSamples{};
-		bool outputWasSilent = true;
 
 		std::mutex inputMutex;
 		std::array<Float32, kInputRingFrameCount * akai_eie::kPlaybackChannelCount>
@@ -607,8 +576,39 @@ namespace akai_eie_hal
 			return;
 
 		std::lock_guard<std::mutex> lock(impl_->outputMutex);
+		++impl_->enqueueStatsCallCount;
+		impl_->enqueueStatsFrameCount += frameCount;
+		if (impl_->enqueueStatsMinFramesPerCall == 0 ||
+			frameCount < impl_->enqueueStatsMinFramesPerCall)
+		{
+			impl_->enqueueStatsMinFramesPerCall = frameCount;
+		}
+		impl_->enqueueStatsMaxFramesPerCall =
+			std::max(impl_->enqueueStatsMaxFramesPerCall, frameCount);
+
 		for (std::uint32_t frame = 0; frame < frameCount; ++frame)
 		{
+			for (std::uint32_t channel = 0; channel < akai_eie::kPlaybackChannelCount; ++channel)
+			{
+				const Float32 sample =
+					interleaved[frame * akai_eie::kPlaybackChannelCount + channel];
+				if (!std::isfinite(sample))
+				{
+					++impl_->enqueueStatsNonFiniteSampleCount;
+					continue;
+				}
+
+				const double absSample =
+					std::fabs(static_cast<double>(sample));
+				impl_->enqueueStatsPeakSample =
+					std::max(impl_->enqueueStatsPeakSample, absSample);
+				impl_->enqueueStatsSampleSquareSum +=
+					static_cast<double>(sample) * static_cast<double>(sample);
+				++impl_->enqueueStatsSampleCount;
+				if (absSample >= 1.0)
+					++impl_->enqueueStatsClippedSampleCount;
+			}
+
 			if (impl_->outputFrameCount == kOutputRingFrameCount)
 			{
 				impl_->outputReadFrame =
@@ -623,15 +623,6 @@ namespace akai_eie_hal
 			impl_->outputWriteFrame =
 				(impl_->outputWriteFrame + 1) % kOutputRingFrameCount;
 			++impl_->outputFrameCount;
-		}
-
-		if (!impl_->outputPrimed &&
-			impl_->outputFrameCount >= OutputPrimeFrameCount(SampleRateHz()))
-		{
-			impl_->outputPrimed = true;
-			os_log(OS_LOG_DEFAULT,
-				   "AKAI EIE Pro USB: playback buffer primed %{public}zu frames",
-				   impl_->outputFrameCount);
 		}
 	}
 
@@ -1287,7 +1278,6 @@ namespace akai_eie_hal
 
 		const std::size_t copiedFrames =
 			PopOutputFrames(transfer.buffer.data(), framesWanted);
-		RecordPlaybackStats(framesWanted, bufferedFrames, copiedFrames);
 		if (copiedFrames < framesWanted)
 		{
 			++impl_->underrunCount;
@@ -1306,6 +1296,8 @@ namespace akai_eie_hal
 			return false;
 		}
 
+		std::uint16_t minPacketBytes = 0;
+		std::uint16_t maxPacketBytes = 0;
 		for (std::size_t i = 0; i < kPlaybackIsoPacketCount; ++i)
 		{
 			if (packetLayout[i].length_bytes > impl_->playMaxPacketSize)
@@ -1314,7 +1306,13 @@ namespace akai_eie_hal
 			transfer.frames[i].frReqCount =
 				static_cast<UInt16>(packetLayout[i].length_bytes);
 			transfer.frames[i].frActCount = 0;
+			if (i == 0 || transfer.frames[i].frReqCount < minPacketBytes)
+				minPacketBytes = transfer.frames[i].frReqCount;
+			maxPacketBytes =
+				std::max(maxPacketBytes, transfer.frames[i].frReqCount);
 		}
+		RecordPlaybackStats(framesWanted, bufferedFrames, copiedFrames,
+							minPacketBytes, maxPacketBytes);
 
 		const std::uint64_t transferDurationBusFrames =
 			PlaybackTransferDurationBusFrames(impl_->frameListMicros);
@@ -1722,72 +1720,6 @@ namespace akai_eie_hal
 		}
 	}
 
-	void AkaiEieUsbTransport::RememberLastPlaybackFrame(
-		const std::uint8_t *frames, std::size_t frameCount) noexcept
-	{
-		if (frames == nullptr || frameCount == 0)
-			return;
-
-		const std::uint8_t *lastFrame =
-			frames + (frameCount - 1) * akai_eie::kPlaybackBytesPerFrame;
-		for (std::size_t channel = 0; channel < akai_eie::kPlaybackChannelCount; ++channel)
-		{
-			impl_->lastPlaybackSamples[channel] =
-				ReadS24LE(lastFrame + channel * 3);
-		}
-	}
-
-	void AkaiEieUsbTransport::FadeInFromSilence(
-		std::uint8_t *frames, std::size_t frameCount) noexcept
-	{
-		if (frames == nullptr || frameCount == 0)
-			return;
-
-		const std::size_t rampFrames =
-			std::min(frameCount, kSilenceRampFrameCount);
-		for (std::size_t frame = 0; frame < rampFrames; ++frame)
-		{
-			const std::size_t numerator = frame + 1;
-			for (std::size_t channel = 0; channel < akai_eie::kPlaybackChannelCount; ++channel)
-			{
-				std::uint8_t *sample =
-					frames + frame * akai_eie::kPlaybackBytesPerFrame + channel * 3;
-				WriteS24LE(ScaleS24(ReadS24LE(sample), numerator, rampFrames),
-						   sample);
-			}
-		}
-	}
-
-	void AkaiEieUsbTransport::FadeOutToSilence(
-		std::uint8_t *frames, std::size_t frameCount) noexcept
-	{
-		if (frames == nullptr || frameCount == 0)
-			return;
-
-		const std::size_t rampFrames =
-			std::min(frameCount, kSilenceRampFrameCount);
-		for (std::size_t frame = 0; frame < rampFrames; ++frame)
-		{
-			const std::size_t numerator = rampFrames - frame - 1;
-			for (std::size_t channel = 0; channel < akai_eie::kPlaybackChannelCount; ++channel)
-			{
-				std::uint8_t *sample =
-					frames + frame * akai_eie::kPlaybackBytesPerFrame + channel * 3;
-				WriteS24LE(ScaleS24(impl_->lastPlaybackSamples[channel],
-									numerator, rampFrames),
-						   sample);
-			}
-		}
-
-		if (rampFrames < frameCount)
-		{
-			std::memset(frames + rampFrames * akai_eie::kPlaybackBytesPerFrame,
-						0,
-						(frameCount - rampFrames) * akai_eie::kPlaybackBytesPerFrame);
-		}
-		impl_->lastPlaybackSamples.fill(0);
-	}
-
 	std::size_t AkaiEieUsbTransport::BufferedOutputFrames() noexcept
 	{
 		std::lock_guard<std::mutex> lock(impl_->outputMutex);
@@ -1846,7 +1778,8 @@ namespace akai_eie_hal
 
 	void AkaiEieUsbTransport::RecordPlaybackStats(
 		std::uint32_t framesWanted, std::size_t bufferedOutputFrames,
-		std::size_t copiedFrames) noexcept
+		std::size_t copiedFrames, std::uint16_t minPacketBytes,
+		std::uint16_t maxPacketBytes) noexcept
 	{
 		const auto now = std::chrono::steady_clock::now();
 		if (impl_->playbackStatsTransferCount == 0)
@@ -1854,6 +1787,10 @@ namespace akai_eie_hal
 			impl_->playbackStatsStarted = now;
 			impl_->playbackStatsMinFrames = framesWanted;
 			impl_->playbackStatsMaxFrames = framesWanted;
+			impl_->playbackStatsMinBufferedFrames = bufferedOutputFrames;
+			impl_->playbackStatsMaxBufferedFrames = bufferedOutputFrames;
+			impl_->playbackStatsMinPacketBytes = minPacketBytes;
+			impl_->playbackStatsMaxPacketBytes = maxPacketBytes;
 		}
 
 		++impl_->playbackStatsTransferCount;
@@ -1862,13 +1799,34 @@ namespace akai_eie_hal
 			std::min(impl_->playbackStatsMinFrames, framesWanted);
 		impl_->playbackStatsMaxFrames =
 			std::max(impl_->playbackStatsMaxFrames, framesWanted);
+		impl_->playbackStatsMinBufferedFrames =
+			std::min(impl_->playbackStatsMinBufferedFrames,
+					 bufferedOutputFrames);
+		impl_->playbackStatsMaxBufferedFrames =
+			std::max(impl_->playbackStatsMaxBufferedFrames,
+					 bufferedOutputFrames);
 		impl_->playbackStatsLastBufferedFrames = bufferedOutputFrames;
 		impl_->playbackStatsLastFilteredFrames =
 			impl_->playbackServoFilteredFrames;
+		impl_->playbackStatsMinPacketBytes =
+			std::min(impl_->playbackStatsMinPacketBytes, minPacketBytes);
+		impl_->playbackStatsMaxPacketBytes =
+			std::max(impl_->playbackStatsMaxPacketBytes, maxPacketBytes);
 		if (copiedFrames < framesWanted)
 		{
 			impl_->playbackStatsUnderrunFrameCount +=
 				framesWanted - copiedFrames;
+		}
+		const std::uint32_t sampleRateHz = SampleRateHz();
+		const double nominalFrames =
+			static_cast<double>(sampleRateHz) *
+			PlaybackTransferSeconds(impl_->frameListMicros);
+		const double nearestNominalFrames = std::round(nominalFrames);
+		if (std::fabs(nominalFrames - nearestNominalFrames) < 0.001 &&
+			framesWanted !=
+				static_cast<std::uint32_t>(nearestNominalFrames))
+		{
+			++impl_->playbackStatsExactRateNudgeCount;
 		}
 
 		const auto elapsed = now - impl_->playbackStatsStarted;
@@ -1878,23 +1836,82 @@ namespace akai_eie_hal
 		const double averageFrames =
 			static_cast<double>(impl_->playbackStatsFrameSum) /
 			static_cast<double>(impl_->playbackStatsTransferCount);
-		const std::uint32_t sampleRateHz = SampleRateHz();
+		const double elapsedSeconds =
+			std::chrono::duration<double>(elapsed).count();
+
+		std::uint64_t enqueueCallCount = 0;
+		std::uint64_t enqueueFrameCount = 0;
+		std::uint32_t enqueueMinFramesPerCall = 0;
+		std::uint32_t enqueueMaxFramesPerCall = 0;
+		double enqueueSampleSquareSum = 0.0;
+		std::uint64_t enqueueSampleCount = 0;
+		double enqueuePeakSample = 0.0;
+		std::uint64_t enqueueClippedSampleCount = 0;
+		std::uint64_t enqueueNonFiniteSampleCount = 0;
+		{
+			std::lock_guard<std::mutex> lock(impl_->outputMutex);
+			enqueueCallCount = impl_->enqueueStatsCallCount;
+			enqueueFrameCount = impl_->enqueueStatsFrameCount;
+			enqueueMinFramesPerCall = impl_->enqueueStatsMinFramesPerCall;
+			enqueueMaxFramesPerCall = impl_->enqueueStatsMaxFramesPerCall;
+			enqueueSampleSquareSum =
+				impl_->enqueueStatsSampleSquareSum;
+			enqueueSampleCount = impl_->enqueueStatsSampleCount;
+			enqueuePeakSample = impl_->enqueueStatsPeakSample;
+			enqueueClippedSampleCount =
+				impl_->enqueueStatsClippedSampleCount;
+			enqueueNonFiniteSampleCount =
+				impl_->enqueueStatsNonFiniteSampleCount;
+
+			impl_->enqueueStatsCallCount = 0;
+			impl_->enqueueStatsFrameCount = 0;
+			impl_->enqueueStatsMinFramesPerCall = 0;
+			impl_->enqueueStatsMaxFramesPerCall = 0;
+			impl_->enqueueStatsSampleSquareSum = 0.0;
+			impl_->enqueueStatsSampleCount = 0;
+			impl_->enqueueStatsPeakSample = 0.0;
+			impl_->enqueueStatsClippedSampleCount = 0;
+			impl_->enqueueStatsNonFiniteSampleCount = 0;
+		}
+		const double enqueueFrameRate =
+			elapsedSeconds > 0.0
+				? static_cast<double>(enqueueFrameCount) / elapsedSeconds
+				: 0.0;
+		const double enqueueRms =
+			enqueueSampleCount > 0
+				? std::sqrt(enqueueSampleSquareSum /
+							static_cast<double>(enqueueSampleCount))
+				: 0.0;
+
 		os_log(OS_LOG_DEFAULT,
-			   "AKAI EIE Pro USB: playback servo rate=%{public}u frameList=%{public}u transfers=%{public}llu buffered=%{public}zu filtered=%{public}.1f target=%{public}zu correction=%{public}.1fppm frames=%{public}u/%{public}.1f/%{public}u underrunFrames=%{public}llu totalUnderruns=%{public}llu dropped=%{public}llu rebuffer=%{public}llu late=%{public}llu maxLate=%{public}llu retry=%{public}llu completionErr=%{public}llu badIsoFrames=%{public}llu capture=%{public}llu/%{public}llu inputOverruns=%{public}llu inFlight=%{public}u",
+			   "AKAI EIE Pro USB: playback servo rate=%{public}u frameList=%{public}u transfers=%{public}llu buffered=%{public}zu range=%{public}zu-%{public}zu filtered=%{public}.1f target=%{public}zu correction=%{public}.1fppm frames=%{public}u/%{public}.1f/%{public}u exactNudge=%{public}llu packetBytes=%{public}u-%{public}u underrunFrames=%{public}llu totalUnderruns=%{public}llu dropped=%{public}llu enqueue=%{public}llu/%{public}llu/%{public}u-%{public}u enqueueRate=%{public}.1f peak=%{public}.4f rms=%{public}.4f clipped=%{public}llu nonFinite=%{public}llu late=%{public}llu maxLate=%{public}llu retry=%{public}llu completionErr=%{public}llu badIsoFrames=%{public}llu capture=%{public}llu/%{public}llu inputOverruns=%{public}llu inFlight=%{public}u",
 			   sampleRateHz, impl_->frameListMicros,
 			   static_cast<unsigned long long>(
 				   impl_->playbackStatsTransferCount),
 			   impl_->playbackStatsLastBufferedFrames,
+			   impl_->playbackStatsMinBufferedFrames,
+			   impl_->playbackStatsMaxBufferedFrames,
 			   impl_->playbackStatsLastFilteredFrames,
 			   OutputServoTargetFrameCount(sampleRateHz),
 			   impl_->playbackServoCorrectionPpm,
 			   impl_->playbackStatsMinFrames, averageFrames,
 			   impl_->playbackStatsMaxFrames,
 			   static_cast<unsigned long long>(
+				   impl_->playbackStatsExactRateNudgeCount),
+			   impl_->playbackStatsMinPacketBytes,
+			   impl_->playbackStatsMaxPacketBytes,
+			   static_cast<unsigned long long>(
 				   impl_->playbackStatsUnderrunFrameCount),
 			   static_cast<unsigned long long>(impl_->underrunCount),
 			   static_cast<unsigned long long>(impl_->droppedFrameCount),
-			   static_cast<unsigned long long>(impl_->rebufferCount),
+			   static_cast<unsigned long long>(enqueueCallCount),
+			   static_cast<unsigned long long>(enqueueFrameCount),
+			   enqueueMinFramesPerCall, enqueueMaxFramesPerCall,
+			   enqueueFrameRate, enqueuePeakSample, enqueueRms,
+			   static_cast<unsigned long long>(
+				   enqueueClippedSampleCount),
+			   static_cast<unsigned long long>(
+				   enqueueNonFiniteSampleCount),
 			   static_cast<unsigned long long>(
 				   impl_->playbackStatsLateScheduleCount),
 			   static_cast<unsigned long long>(
@@ -1925,8 +1942,13 @@ namespace akai_eie_hal
 		impl_->playbackStatsCaptureByteCount = 0;
 		impl_->playbackStatsMinFrames = 0;
 		impl_->playbackStatsMaxFrames = 0;
+		impl_->playbackStatsMinBufferedFrames = 0;
+		impl_->playbackStatsMaxBufferedFrames = 0;
 		impl_->playbackStatsLastBufferedFrames = 0;
 		impl_->playbackStatsLastFilteredFrames = 0.0;
+		impl_->playbackStatsExactRateNudgeCount = 0;
+		impl_->playbackStatsMinPacketBytes = 0;
+		impl_->playbackStatsMaxPacketBytes = 0;
 	}
 
 	std::size_t AkaiEieUsbTransport::PopOutputFrames(std::uint8_t *outFrames,
@@ -1939,21 +1961,7 @@ namespace akai_eie_hal
 		{
 			std::lock_guard<std::mutex> lock(impl_->outputMutex);
 
-			if (!impl_->outputPrimed &&
-				impl_->outputFrameCount >=
-					OutputReprimeFrameCount(SampleRateHz()))
-			{
-				impl_->outputPrimed = true;
-				++impl_->rebufferCount;
-				if (impl_->rebufferCount <= 5)
-				{
-					os_log(OS_LOG_DEFAULT,
-						   "AKAI EIE Pro USB: playback re-primed %{public}zu frames",
-						   impl_->outputFrameCount);
-				}
-			}
-
-			while (impl_->outputPrimed && copied < frameCount && impl_->outputFrameCount > 0)
+			while (copied < frameCount && impl_->outputFrameCount > 0)
 			{
 				const std::size_t contiguousAvailable =
 					std::min(impl_->outputFrameCount,
@@ -1973,27 +1981,14 @@ namespace akai_eie_hal
 				impl_->outputFrameCount -= framesToCopy;
 				copied += framesToCopy;
 			}
-
-			if (impl_->outputPrimed && copied == 0 && impl_->outputFrameCount == 0)
-			{
-				impl_->outputPrimed = false;
-			}
-		}
-
-		if (copied > 0)
-		{
-			if (impl_->outputWasSilent)
-				FadeInFromSilence(outFrames, copied);
-			RememberLastPlaybackFrame(outFrames, copied);
-			impl_->outputWasSilent = false;
 		}
 
 		if (copied < frameCount)
 		{
-			FadeOutToSilence(
+			std::memset(
 				outFrames + copied * akai_eie::kPlaybackBytesPerFrame,
-				frameCount - copied);
-			impl_->outputWasSilent = true;
+				0,
+				(frameCount - copied) * akai_eie::kPlaybackBytesPerFrame);
 		}
 
 		return copied;
@@ -2008,18 +2003,23 @@ namespace akai_eie_hal
 		impl_->outputReadFrame = 0;
 		impl_->outputWriteFrame = 0;
 		impl_->outputFrameCount = 0;
-		impl_->outputPrimed = false;
 		impl_->underrunCount = 0;
-		impl_->rebufferCount = 0;
 		impl_->droppedFrameCount = 0;
+		impl_->enqueueStatsCallCount = 0;
+		impl_->enqueueStatsFrameCount = 0;
+		impl_->enqueueStatsMinFramesPerCall = 0;
+		impl_->enqueueStatsMaxFramesPerCall = 0;
+		impl_->enqueueStatsSampleSquareSum = 0.0;
+		impl_->enqueueStatsSampleCount = 0;
+		impl_->enqueueStatsPeakSample = 0.0;
+		impl_->enqueueStatsClippedSampleCount = 0;
+		impl_->enqueueStatsNonFiniteSampleCount = 0;
 		impl_->syncErrorCount = 0;
 		impl_->playbackCompletionErrorCount = 0;
 		impl_->consecutivePlaybackErrorCount = 0;
 		impl_->consecutiveEmptySyncPacketCount = 0;
 		impl_->syncFeedbackFallbackLogged = false;
 		impl_->syncFeedbackEmptyLogged = false;
-		impl_->lastPlaybackSamples.fill(0);
-		impl_->outputWasSilent = true;
 		impl_->playbackFrameAccumulator = 0.0;
 		impl_->playbackServoCorrectionPpm = 0.0;
 		impl_->playbackServoFilteredFrames = 0.0;
@@ -2037,8 +2037,13 @@ namespace akai_eie_hal
 		impl_->playbackStatsCaptureByteCount = 0;
 		impl_->playbackStatsMinFrames = 0;
 		impl_->playbackStatsMaxFrames = 0;
+		impl_->playbackStatsMinBufferedFrames = 0;
+		impl_->playbackStatsMaxBufferedFrames = 0;
 		impl_->playbackStatsLastBufferedFrames = 0;
 		impl_->playbackStatsLastFilteredFrames = 0.0;
+		impl_->playbackStatsExactRateNudgeCount = 0;
+		impl_->playbackStatsMinPacketBytes = 0;
+		impl_->playbackStatsMaxPacketBytes = 0;
 	}
 
 	void AkaiEieUsbTransport::ResetInputRing() noexcept

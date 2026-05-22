@@ -55,7 +55,10 @@ Implemented alignment in this project:
 - Restarts the USB transport when the HAL nominal sample rate changes.
 - Exposes a mutable buffer frame size property.
 - Exposes CoreAudio element names for input and USB output channels.
-- Starts both playback isochronous output and bulk capture input.
+- Starts playback isochronous output immediately and starts bulk capture on
+  demand when CoreAudio reads input.
+- Copies whatever playback frames are available and zero-fills only the missing
+  tail on underrun, matching the Linux/Ploytec-style no-prime behavior.
 - Uses filtered output-ring fill level as the playback clock servo error signal,
   with a deadband and fractional accumulator for sub-frame rate corrections.
 - Limits playback isochronous lookahead to 8 transfers so future transfers are

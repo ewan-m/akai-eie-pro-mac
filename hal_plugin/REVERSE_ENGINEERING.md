@@ -59,10 +59,12 @@ Implemented alignment in this project:
   demand when CoreAudio reads input.
 - Copies whatever playback frames are available and zero-fills only the missing
   tail on underrun, matching the Linux/Ploytec-style no-prime behavior.
-- Uses filtered output-ring fill level as the playback clock servo error signal,
-  with a deadband and fractional accumulator for sub-frame rate corrections.
-- Limits playback isochronous lookahead to 8 transfers so future transfers are
-  less likely to be filled with underrun padding before CoreAudio refills.
+- Uses IOKit low-latency isochronous write buffers for playback so the data and
+  frame-list memory are pre-allocated and shared with the USB stack.
+- Keeps filtered pending playback frame telemetry (ring plus submitted
+  transfers) for the playback clock servo, while this debug build drives
+  transfer frame counts from the nominal fractional accumulator.
+- Keeps 8 playback transfers available for macOS/xHCI scheduling runway.
 - Does not schedule the empty sync-feedback endpoint; the pipe is still detected
   and logged for diagnostics.
 - Starts two larger capture bulk reads on demand when CoreAudio reads input,

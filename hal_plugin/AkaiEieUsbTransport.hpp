@@ -36,6 +36,8 @@ namespace akai_eie_hal
 		void WorkerMain() noexcept;
 		bool OpenUsb() noexcept;
 		void CloseUsb() noexcept;
+		bool CreatePlaybackLowLatencyBuffers() noexcept;
+		void DestroyPlaybackLowLatencyBuffers() noexcept;
 		bool StartSyncTransfers() noexcept;
 		bool StartPlaybackTransfers() noexcept;
 		bool StartCaptureTransfers() noexcept;
@@ -51,13 +53,17 @@ namespace akai_eie_hal
 		bool ReadCurrentDataUsbFrame(std::uint64_t *outFrame) noexcept;
 		std::uint32_t SampleRateHz() const noexcept;
 		std::size_t BufferedOutputFrames() noexcept;
+		std::size_t SubmittedPlaybackFrames() const noexcept;
 		std::uint32_t CalculatePlaybackFramesWanted(
-			std::size_t bufferedOutputFrames) noexcept;
+			std::size_t pendingOutputFrames) noexcept;
 		void RecordPlaybackStats(std::uint32_t framesWanted,
 								 std::size_t bufferedOutputFrames,
+								 std::size_t pendingOutputFrames,
 								 std::size_t copiedFrames,
 								 std::uint16_t minPacketBytes,
 								 std::uint16_t maxPacketBytes) noexcept;
+		void InspectPlaybackPayload(const std::uint8_t *frames,
+									std::size_t frameCount) noexcept;
 		void PushCaptureUsbFrames(const std::uint8_t *usbFrames,
 								  std::size_t byteCount) noexcept;
 		std::size_t PopOutputFrames(std::uint8_t *outFrames,

@@ -22,6 +22,8 @@ The goal is for the same code to back either:
 - Playback transfer filling for already-packed 12-byte AKAI wire frames.
 - Capture decoding from the device's 64-byte USB frames into 1, 2, or 4
   channels of little-endian PCM.
+- Capture decoding from the device's 64-byte USB frames into 4-channel
+  interleaved Float32 for CoreAudio/AudioDriverKit stream buffers.
 
 ## Platform Adapter Responsibilities
 

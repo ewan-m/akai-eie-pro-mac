@@ -12,6 +12,7 @@ namespace akai_eie
 
 	constexpr std::uint8_t kKnownCaptureEndpointAddress = 0x86;
 	constexpr std::uint32_t kPlaybackChannelCount = 4;
+	constexpr std::uint32_t kCaptureChannelCount = 4;
 	constexpr std::size_t kPlaybackBytesPerFrame = 12;
 	constexpr std::size_t kCaptureBytesPerUsbFrame = 64;
 	constexpr std::size_t kDefaultCaptureTransferBytes = 4096;
@@ -108,6 +109,19 @@ namespace akai_eie
 
 	CaptureSampleFrame DecodeCaptureUsbFrame(
 		const std::uint8_t frame[kCaptureBytesPerUsbFrame]) noexcept;
+
+	float S24ToFloat32(std::int32_t sample) noexcept;
+
+	bool DecodeCaptureUsbFrameToFloat32(
+		const std::uint8_t frame[kCaptureBytesPerUsbFrame],
+		float out_interleaved[kCaptureChannelCount]) noexcept;
+
+	// Decodes whole 64-byte capture USB frames into 4-channel interleaved
+	// Float32 frames suitable for CoreAudio/AudioDriverKit stream buffers.
+	// Returns the number of PCM frames written.
+	std::size_t DecodeCaptureBufferToFloat32(
+		const std::uint8_t *usb_buffer, std::size_t usb_buffer_bytes,
+		float *pcm_interleaved, std::size_t pcm_frame_capacity) noexcept;
 
 	std::size_t PcmFrameBytes(PcmSampleFormat format,
 							  std::uint32_t channels) noexcept;

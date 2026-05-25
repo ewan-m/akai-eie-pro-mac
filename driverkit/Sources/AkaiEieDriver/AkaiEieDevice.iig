@@ -1,0 +1,68 @@
+#ifndef AKAI_EIE_DEVICE_IIG
+#define AKAI_EIE_DEVICE_IIG
+
+#include <DriverKit/DriverKit.iig>
+#include <DriverKit/IOBufferMemoryDescriptor.iig>
+#include <DriverKit/IOMemoryMap.iig>
+#include <AudioDriverKit/IOUserAudioDevice.iig>
+
+using namespace AudioDriverKit;
+
+class IOUserAudioDriver;
+class AkaiEieDriver;
+
+struct AkaiEieDevice_IVars
+{
+	AkaiEieDriver *transportDriver;
+	OSSharedPtr<IOUserAudioStream> outputStream;
+	OSSharedPtr<IOUserAudioStream> inputStream;
+	OSSharedPtr<IOBufferMemoryDescriptor> outputBuffer;
+	OSSharedPtr<IOBufferMemoryDescriptor> inputBuffer;
+	OSSharedPtr<IOMemoryMap> outputMap;
+	OSSharedPtr<IOMemoryMap> inputMap;
+	OSSharedPtr<IOTimerDispatchSource> zeroTimestampTimer;
+	uint8_t *outputBufferAddress;
+	uint8_t *inputBufferAddress;
+	uint64_t zeroTimestampSampleTime;
+	uint64_t zeroTimestampIntervalTicks;
+	uint64_t zeroTimestampNextHostTime;
+	uint32_t zeroTimestampPeriod;
+	bool ioStarted;
+	uint64_t writeOperationCount;
+	uint64_t readOperationCount;
+};
+
+class AkaiEieDevice : public IOUserAudioDevice
+{
+public:
+	virtual bool init(IOUserAudioDriver *driver,
+					  bool supportsPrewarming,
+					  OSString *deviceUid,
+					  OSString *modelUid,
+					  OSString *manufacturerUid,
+					  uint32_t zeroTimestampPeriod) override LOCALONLY;
+	virtual void free() override LOCALONLY;
+
+	virtual kern_return_t StartIO(IOUserAudioStartStopFlags flags) override LOCALONLY;
+	virtual kern_return_t StopIO(IOUserAudioStartStopFlags flags) override LOCALONLY;
+	virtual kern_return_t PerformDeviceConfigurationChange(uint64_t changeAction,
+														   OSObject *changeInfo) override LOCALONLY;
+	virtual kern_return_t AbortDeviceConfigurationChange(uint64_t changeAction,
+														 OSObject *changeInfo) override LOCALONLY;
+	virtual kern_return_t HandleChangeSampleRate(double sampleRate) override LOCALONLY;
+	virtual void TimerOccurred(OSAction *action,
+							   uint64_t time) TYPE(IOTimerDispatchSource::TimerOccurred);
+	void SetTransportDriver(AkaiEieDriver *driver) LOCALONLY;
+
+private:
+	kern_return_t ConfigureStreams(IOUserAudioDriver *driver) LOCALONLY;
+	kern_return_t ConfigureZeroTimestampTimer() LOCALONLY;
+	kern_return_t StartZeroTimestampTimer() LOCALONLY;
+	void StopZeroTimestampTimer() LOCALONLY;
+	kern_return_t MapStreamBuffers() LOCALONLY;
+	void UnmapStreamBuffers() LOCALONLY;
+	void ZeroInputFrames(uint64_t sampleTime, uint32_t frameCount) LOCALONLY;
+	void QueueOutputFrames(uint64_t sampleTime, uint32_t frameCount) LOCALONLY;
+};
+
+#endif // AKAI_EIE_DEVICE_IIG

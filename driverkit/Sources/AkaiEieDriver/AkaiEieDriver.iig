@@ -1,0 +1,93 @@
+#ifndef AKAI_EIE_DRIVER_IIG
+#define AKAI_EIE_DRIVER_IIG
+
+#include <DriverKit/IOService.iig>
+#include <DriverKit/IOBufferMemoryDescriptor.iig>
+#include <DriverKit/IOMemoryMap.iig>
+#include <DriverKit/OSSharedPtr.h>
+#include <AudioDriverKit/IOUserAudioDriver.iig>
+#include <USBDriverKit/IOUSBHostDevice.iig>
+#include <USBDriverKit/IOUSBHostInterface.iig>
+#include <USBDriverKit/IOUSBHostPipe.iig>
+
+#include "AkaiEieDevice.iig"
+#include "AkaiEieDriverConfig.hpp"
+
+using namespace AudioDriverKit;
+
+struct AkaiEiePlaybackTransfer
+{
+	OSSharedPtr<IOBufferMemoryDescriptor> dataBuffer;
+	OSSharedPtr<IOMemoryMap> dataMap;
+	OSSharedPtr<IOBufferMemoryDescriptor> frameListBuffer;
+	OSSharedPtr<IOMemoryMap> frameListMap;
+	OSSharedPtr<OSAction> completion;
+	uint8_t *dataAddress;
+	IOUSBIsochronousFrame *frameListAddress;
+	bool submitted;
+};
+
+struct AkaiEieDriver_IVars
+{
+	OSSharedPtr<IODispatchQueue> workQueue;
+	OSSharedPtr<AkaiEieDevice> audioDevice;
+	OSSharedPtr<IOUSBHostDevice> usbDevice;
+	OSSharedPtr<IOUSBHostInterface> playbackInterface;
+	OSSharedPtr<IOUSBHostInterface> dataInterface;
+	OSSharedPtr<IOUSBHostPipe> playbackPipe;
+	AkaiEiePlaybackTransfer playbackTransfers[akai_eie_driver::kPlaybackTransferCount];
+	OSSharedPtr<OSString> driverName;
+	OSSharedPtr<OSString> deviceName;
+	OSSharedPtr<OSString> deviceUid;
+	OSSharedPtr<OSString> modelUid;
+	OSSharedPtr<OSString> manufacturerName;
+	uint8_t *playbackRingAddress;
+	uint64_t playbackReadFrame;
+	uint64_t playbackWriteFrame;
+	uint64_t nextUsbFrame;
+	uint64_t playbackEnqueuedFrames;
+	uint64_t playbackSubmittedFrames;
+	uint64_t playbackUnderrunFrames;
+	uint64_t playbackDroppedFrames;
+	uint64_t playbackPacketErrorCount;
+	uint32_t playbackInFlight;
+	bool usbDeviceOpen;
+	bool playbackInterfaceOpen;
+	bool dataInterfaceOpen;
+	bool playbackHasReceivedFrames;
+	bool playbackTransfersStarted;
+	bool playbackStopPending;
+	bool playbackRunning;
+};
+
+class AkaiEieDriver : public IOUserAudioDriver
+{
+public:
+	virtual bool init() override;
+	virtual void free() override;
+	virtual kern_return_t Start(IOService *provider) override;
+	virtual kern_return_t Stop(IOService *provider) override;
+	virtual kern_return_t StartDevice(IOUserAudioObjectID objectId,
+									  IOUserAudioStartStopFlags flags) override LOCALONLY;
+	virtual kern_return_t StopDevice(IOUserAudioObjectID objectId,
+									 IOUserAudioStartStopFlags flags) override LOCALONLY;
+	void EnqueuePlaybackFrames(const float *frames, uint32_t frameCount) LOCALONLY;
+	virtual void PlaybackComplete(OSAction *action,
+								  IOReturn status) TYPE(IOUSBHostPipe::CompleteAsyncIsochIO);
+
+private:
+	kern_return_t CaptureUsbProvider(IOService *provider) LOCALONLY;
+	kern_return_t CreateAudioDevice() LOCALONLY;
+	kern_return_t StartPlayback() LOCALONLY;
+	void StopPlayback() LOCALONLY;
+	kern_return_t OpenPlaybackInterface() LOCALONLY;
+	kern_return_t SendPlaybackSetup() LOCALONLY;
+	kern_return_t CreatePlaybackTransfers() LOCALONLY;
+	kern_return_t StartPrimedPlaybackTransfers() LOCALONLY;
+	kern_return_t SubmitPlaybackTransfer(uint32_t index) LOCALONLY;
+	void FinishPlaybackStop() LOCALONLY;
+	void ReleasePlaybackResources() LOCALONLY;
+	void CloseUsbProvider() LOCALONLY;
+};
+
+#endif // AKAI_EIE_DRIVER_IIG

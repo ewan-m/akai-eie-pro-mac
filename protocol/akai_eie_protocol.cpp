@@ -343,6 +343,51 @@ namespace akai_eie
 				SignExtend24(ch4)};
 	}
 
+	float S24ToFloat32(std::int32_t sample) noexcept
+	{
+		return sample < 0
+				   ? static_cast<float>(sample / 8388608.0f)
+				   : static_cast<float>(sample / 8388607.0f);
+	}
+
+	bool DecodeCaptureUsbFrameToFloat32(
+		const std::uint8_t frame[kCaptureBytesPerUsbFrame],
+		float out_interleaved[kCaptureChannelCount]) noexcept
+	{
+		if (frame == nullptr || out_interleaved == nullptr)
+			return false;
+
+		const CaptureSampleFrame decoded = DecodeCaptureUsbFrame(frame);
+		out_interleaved[0] = S24ToFloat32(decoded.ch1);
+		out_interleaved[1] = S24ToFloat32(decoded.ch2);
+		out_interleaved[2] = S24ToFloat32(decoded.ch3);
+		out_interleaved[3] = S24ToFloat32(decoded.ch4);
+		return true;
+	}
+
+	std::size_t DecodeCaptureBufferToFloat32(
+		const std::uint8_t *usb_buffer, std::size_t usb_buffer_bytes,
+		float *pcm_interleaved, std::size_t pcm_frame_capacity) noexcept
+	{
+		if (usb_buffer == nullptr || pcm_interleaved == nullptr)
+			return 0;
+
+		const std::size_t usb_frames =
+			usb_buffer_bytes / kCaptureBytesPerUsbFrame;
+		const std::size_t frames_to_decode =
+			usb_frames < pcm_frame_capacity ? usb_frames : pcm_frame_capacity;
+
+		for (std::size_t frame_index = 0; frame_index < frames_to_decode;
+			 ++frame_index)
+		{
+			DecodeCaptureUsbFrameToFloat32(
+				usb_buffer + frame_index * kCaptureBytesPerUsbFrame,
+				pcm_interleaved + frame_index * kCaptureChannelCount);
+		}
+
+		return frames_to_decode;
+	}
+
 	std::size_t PcmFrameBytes(PcmSampleFormat format,
 							  std::uint32_t channels) noexcept
 	{

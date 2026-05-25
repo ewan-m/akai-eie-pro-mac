@@ -44,3 +44,4 @@ ref/
 
 # Other
 .*.cmd
+.DS_Store

@@ -10,51 +10,51 @@
 namespace
 {
 
-IOUserAudioStreamBasicDescription MakeFloat32StreamFormat(double sampleRate)
-{
-	return {
-		sampleRate,
-		IOUserAudioFormatID::LinearPCM,
-		static_cast<IOUserAudioFormatFlags>(
-			IOUserAudioFormatFlags::FormatFlagsNativeFloatPacked),
-		akai_eie_driver::kBytesPerFrame,
-		1,
-		akai_eie_driver::kBytesPerFrame,
-		akai_eie_driver::kChannelCount,
-		32,
-		0};
-}
-
-template <typename T, size_t N>
-constexpr uint32_t CountOf(const T (&)[N])
-{
-	return static_cast<uint32_t>(N);
-}
-
-void ZeroWrappedFrames(uint8_t *buffer, uint64_t sampleTime, uint32_t frameCount)
-{
-	if (buffer == nullptr || frameCount == 0)
-		return;
-
-	const uint32_t firstFrame =
-		static_cast<uint32_t>(sampleTime % akai_eie_driver::kIOBufferFrameCount);
-	const uint32_t firstFrameCount =
-		frameCount <= akai_eie_driver::kIOBufferFrameCount - firstFrame
-			? frameCount
-			: akai_eie_driver::kIOBufferFrameCount - firstFrame;
-	const uint32_t remainingFrameCount = frameCount - firstFrameCount;
-
-	memset(buffer + firstFrame * akai_eie_driver::kBytesPerFrame,
-		   0,
-		   firstFrameCount * akai_eie_driver::kBytesPerFrame);
-
-	if (remainingFrameCount > 0)
+	IOUserAudioStreamBasicDescription MakeFloat32StreamFormat(double sampleRate)
 	{
-		memset(buffer,
-			   0,
-			   remainingFrameCount * akai_eie_driver::kBytesPerFrame);
+		return {
+			sampleRate,
+			IOUserAudioFormatID::LinearPCM,
+			static_cast<IOUserAudioFormatFlags>(
+				IOUserAudioFormatFlags::FormatFlagsNativeFloatPacked),
+			akai_eie_driver::kBytesPerFrame,
+			1,
+			akai_eie_driver::kBytesPerFrame,
+			akai_eie_driver::kChannelCount,
+			32,
+			0};
 	}
-}
+
+	template <typename T, size_t N>
+	constexpr uint32_t CountOf(const T (&)[N])
+	{
+		return static_cast<uint32_t>(N);
+	}
+
+	void ZeroWrappedFrames(uint8_t *buffer,
+						   uint32_t ringFrameCount,
+						   uint64_t sampleTime,
+						   uint32_t frameCount)
+	{
+		if (buffer == nullptr || ringFrameCount == 0 || frameCount == 0)
+			return;
+
+		while (frameCount > 0)
+		{
+			const uint32_t firstFrame =
+				static_cast<uint32_t>(sampleTime % ringFrameCount);
+			const uint32_t contiguousFrameCount =
+				frameCount <= ringFrameCount - firstFrame
+					? frameCount
+					: ringFrameCount - firstFrame;
+
+			memset(buffer + firstFrame * akai_eie_driver::kBytesPerFrame,
+				   0,
+				   contiguousFrameCount * akai_eie_driver::kBytesPerFrame);
+			sampleTime += contiguousFrameCount;
+			frameCount -= contiguousFrameCount;
+		}
+	}
 
 } // namespace
 
@@ -143,30 +143,30 @@ bool AkaiEieDevice::init(IOUserAudioDriver *driver,
 		uint32_t ioBufferFrameSize,
 		uint64_t sampleTime,
 		uint64_t hostTime) {
-		(void)device;
-		(void)hostTime;
+	  (void)device;
+	  (void)hostTime;
 
-		if (ivars == nullptr || !ivars->ioStarted)
-			return kIOReturnSuccess;
+	  if (ivars == nullptr || !ivars->ioStarted)
+		  return kIOReturnSuccess;
 
-		if (operation == IOUserAudioIOOperationBeginRead)
-		{
-			__atomic_add_fetch(
-				&ivars->readOperationCount,
-				1,
-				__ATOMIC_RELAXED);
-			ZeroInputFrames(sampleTime, ioBufferFrameSize);
-		}
-		else if (operation == IOUserAudioIOOperationWriteEnd)
-		{
-			__atomic_add_fetch(
-				&ivars->writeOperationCount,
-				1,
-				__ATOMIC_RELAXED);
-			QueueOutputFrames(sampleTime, ioBufferFrameSize);
-		}
+	  if (operation == IOUserAudioIOOperationBeginRead)
+	  {
+		  __atomic_add_fetch(
+			  &ivars->readOperationCount,
+			  1,
+			  __ATOMIC_RELAXED);
+		  ZeroInputFrames(sampleTime, ioBufferFrameSize);
+	  }
+	  else if (operation == IOUserAudioIOOperationWriteEnd)
+	  {
+		  __atomic_add_fetch(
+			  &ivars->writeOperationCount,
+			  1,
+			  __ATOMIC_RELAXED);
+		  QueueOutputFrames(sampleTime, ioBufferFrameSize);
+	  }
 
-		return kIOReturnSuccess;
+	  return kIOReturnSuccess;
 	};
 
 	ret = SetIOOperationHandler(ioOperation);
@@ -323,7 +323,7 @@ kern_return_t AkaiEieDevice::StartIO(IOUserAudioStartStopFlags flags)
 
 	(void)ivars->outputStream->SetStreamIsActive(true);
 	(void)ivars->inputStream->SetStreamIsActive(true);
-	ZeroInputFrames(0, akai_eie_driver::kIOBufferFrameCount);
+	ZeroInputFrames(0, ivars->zeroTimestampPeriod);
 
 	os_log(OS_LOG_DEFAULT, "AkaiEieDevice::StartIO");
 	return kIOReturnSuccess;
@@ -360,23 +360,29 @@ kern_return_t AkaiEieDevice::MapStreamBuffers()
 
 void AkaiEieDevice::ZeroInputFrames(uint64_t sampleTime, uint32_t frameCount)
 {
-	ZeroWrappedFrames(ivars->inputBufferAddress, sampleTime, frameCount);
+	ZeroWrappedFrames(
+		ivars->inputBufferAddress,
+		ivars->zeroTimestampPeriod,
+		sampleTime,
+		frameCount);
 }
 
 void AkaiEieDevice::QueueOutputFrames(uint64_t sampleTime, uint32_t frameCount)
 {
 	if (ivars->transportDriver == nullptr ||
-		ivars->outputBufferAddress == nullptr)
+		ivars->outputBufferAddress == nullptr ||
+		ivars->zeroTimestampPeriod == 0)
 		return;
 
+	// AudioDriverKit addresses stream windows modulo the hardware timeline period.
 	while (frameCount > 0)
 	{
 		const uint32_t firstFrame = static_cast<uint32_t>(
-			sampleTime % akai_eie_driver::kIOBufferFrameCount);
+			sampleTime % ivars->zeroTimestampPeriod);
 		const uint32_t contiguousFrameCount =
-			frameCount <= akai_eie_driver::kIOBufferFrameCount - firstFrame
+			frameCount <= ivars->zeroTimestampPeriod - firstFrame
 				? frameCount
-				: akai_eie_driver::kIOBufferFrameCount - firstFrame;
+				: ivars->zeroTimestampPeriod - firstFrame;
 		const float *frames = reinterpret_cast<const float *>(
 			ivars->outputBufferAddress +
 			firstFrame * akai_eie_driver::kBytesPerFrame);

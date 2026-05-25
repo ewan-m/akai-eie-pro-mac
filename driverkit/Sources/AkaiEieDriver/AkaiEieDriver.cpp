@@ -590,7 +590,7 @@ kern_return_t AkaiEieDriver::ValidateSyncClock()
 		return kIOReturnNotReady;
 
 	AkaiEieSyncTransfer &transfer = ivars->syncTransfers[0];
-	uint32_t lastFirstCompleteCount = 0;
+	uint32_t lastCompleteCount = 0;
 	uint64_t lastHostTime = 0;
 	uint8_t lastFeedback = 0;
 	for (uint32_t attempt = 0;
@@ -619,16 +619,21 @@ kern_return_t AkaiEieDriver::ValidateSyncClock()
 			return ret;
 
 		const IOUSBIsochronousFrame &frame = transfer.frameListAddress[0];
+		lastCompleteCount = frame.completeCount;
 		if (frame.status != kIOReturnSuccess)
-			return frame.status;
+		{
+			__atomic_add_fetch(
+				&ivars->syncPacketErrorCount, 1, __ATOMIC_RELAXED);
+			continue;
+		}
 		if (frame.completeCount == 0)
 		{
 			__atomic_add_fetch(
 				&ivars->syncMissingReportCount, 1, __ATOMIC_RELAXED);
 			continue;
 		}
+
 		const uint8_t feedback = transfer.dataAddress[0];
-		lastFirstCompleteCount = frame.completeCount;
 		lastHostTime = frame.timeStamp;
 		lastFeedback = feedback;
 		if (!akai_eie::IsReasonableSyncFeedback(feedback))
@@ -665,7 +670,7 @@ kern_return_t AkaiEieDriver::ValidateSyncClock()
 	os_log(OS_LOG_DEFAULT,
 		   "AkaiEieDriver::ValidateSyncClock did not observe a device-clock report "
 		   "lastLength=%{public}u lastValue=%{public}u hostTime=%{public}llu",
-		   lastFirstCompleteCount, lastFeedback,
+		   lastCompleteCount, lastFeedback,
 		   static_cast<unsigned long long>(lastHostTime));
 	return kIOReturnNotResponding;
 }
@@ -957,6 +962,10 @@ kern_return_t AkaiEieDriver::StartPlayback()
 	__atomic_store_n(&ivars->playbackUnderrunFrames, 0, __ATOMIC_RELAXED);
 	__atomic_store_n(&ivars->playbackDroppedFrames, 0, __ATOMIC_RELAXED);
 	__atomic_store_n(&ivars->playbackPacketErrorCount, 0, __ATOMIC_RELAXED);
+	__atomic_store_n(&ivars->playbackScheduleRecoveryCount, 0, __ATOMIC_RELAXED);
+	__atomic_store_n(&ivars->playbackNoFeedbackCount, 0, __ATOMIC_RELAXED);
+	__atomic_store_n(&ivars->playbackFeedbackMismatchCount, 0, __ATOMIC_RELAXED);
+	__atomic_store_n(&ivars->playbackSubmittedTransferCount, 0, __ATOMIC_RELAXED);
 	__atomic_store_n(&ivars->playbackNonzeroTransfers, 0, __ATOMIC_RELAXED);
 	__atomic_store_n(&ivars->playbackNonzeroBytes, 0, __ATOMIC_RELAXED);
 	__atomic_store_n(&ivars->syncPacketErrorCount, 0, __ATOMIC_RELAXED);
@@ -1061,8 +1070,8 @@ void AkaiEieDriver::EnqueuePlaybackFrames(const float *frames,
 			frameCount - akai_eie_driver::kPlaybackRingFrameCount,
 			__ATOMIC_RELAXED);
 		frames += static_cast<size_t>(
-			frameCount - akai_eie_driver::kPlaybackRingFrameCount) *
-			akai_eie_driver::kChannelCount;
+					  frameCount - akai_eie_driver::kPlaybackRingFrameCount) *
+				  akai_eie_driver::kChannelCount;
 		frameCount = akai_eie_driver::kPlaybackRingFrameCount;
 	}
 
@@ -1204,6 +1213,22 @@ kern_return_t AkaiEieDriver::SubmitPlaybackTransfer(uint32_t index)
 
 	const uint32_t feedbackFrames =
 		__atomic_exchange_n(&ivars->syncFramesElapsed, 0, __ATOMIC_ACQ_REL);
+	if (__atomic_load_n(&ivars->syncClockBaseFrames, __ATOMIC_ACQUIRE) != 0)
+	{
+		if (feedbackFrames == 0)
+		{
+			__atomic_add_fetch(
+				&ivars->playbackNoFeedbackCount, 1, __ATOMIC_RELAXED);
+		}
+		else if (feedbackFrames + 1 <
+					 akai_eie_driver::kPlaybackFramesPerTransfer ||
+				 feedbackFrames >
+					 akai_eie_driver::kPlaybackFramesPerTransfer + 1)
+		{
+			__atomic_add_fetch(
+				&ivars->playbackFeedbackMismatchCount, 1, __ATOMIC_RELAXED);
+		}
+	}
 	const uint32_t framesWanted = akai_eie::CalculatePlaybackFramesWanted(
 		akai_eie_driver::kDefaultSampleRateHz,
 		ivars->playbackTimingState,
@@ -1328,6 +1353,8 @@ kern_return_t AkaiEieDriver::SubmitPlaybackTransfer(uint32_t index)
 	if (ivars->nextUsbFrame <
 		currentFrame + akai_eie_driver::kPlaybackScheduleLeadBusFrames)
 	{
+		__atomic_add_fetch(
+			&ivars->playbackScheduleRecoveryCount, 1, __ATOMIC_RELAXED);
 		ivars->nextUsbFrame =
 			currentFrame + akai_eie_driver::kPlaybackScheduleLeadBusFrames;
 	}
@@ -1347,12 +1374,17 @@ kern_return_t AkaiEieDriver::SubmitPlaybackTransfer(uint32_t index)
 		transfer.submitted = false;
 		--ivars->playbackInFlight;
 	}
-	else if (nonzeroBytes != 0)
+	else
 	{
 		__atomic_add_fetch(
-			&ivars->playbackNonzeroTransfers, 1, __ATOMIC_RELAXED);
-		__atomic_add_fetch(
-			&ivars->playbackNonzeroBytes, nonzeroBytes, __ATOMIC_RELAXED);
+			&ivars->playbackSubmittedTransferCount, 1, __ATOMIC_RELAXED);
+		if (nonzeroBytes != 0)
+		{
+			__atomic_add_fetch(
+				&ivars->playbackNonzeroTransfers, 1, __ATOMIC_RELAXED);
+			__atomic_add_fetch(
+				&ivars->playbackNonzeroBytes, nonzeroBytes, __ATOMIC_RELAXED);
+		}
 	}
 	return ret;
 }
@@ -1509,12 +1541,21 @@ void AkaiEieDriver::FailPlaybackStream(IOReturn status)
 		(void)ivars->audioDevice->SetClockIsStable(false);
 	os_log(OS_LOG_DEFAULT,
 		   "AkaiEieDriver::FailPlaybackStream stopping output because required USB stream failed "
-		   "0x%{public}x nonzeroTransfers=%{public}llu syncErrors=%{public}llu "
+		   "0x%{public}x transfers=%{public}llu nonzeroTransfers=%{public}llu scheduleRecoveries=%{public}llu "
+		   "noFeedback=%{public}llu feedbackMismatch=%{public}llu syncErrors=%{public}llu "
 		   "syncMissing=%{public}llu syncReports=%{public}llu syncFrames=%{public}llu "
 		   "syncPending=%{public}u",
 		   status,
 		   static_cast<unsigned long long>(
+			   __atomic_load_n(&ivars->playbackSubmittedTransferCount, __ATOMIC_RELAXED)),
+		   static_cast<unsigned long long>(
 			   __atomic_load_n(&ivars->playbackNonzeroTransfers, __ATOMIC_RELAXED)),
+		   static_cast<unsigned long long>(
+			   __atomic_load_n(&ivars->playbackScheduleRecoveryCount, __ATOMIC_RELAXED)),
+		   static_cast<unsigned long long>(
+			   __atomic_load_n(&ivars->playbackNoFeedbackCount, __ATOMIC_RELAXED)),
+		   static_cast<unsigned long long>(
+			   __atomic_load_n(&ivars->playbackFeedbackMismatchCount, __ATOMIC_RELAXED)),
 		   static_cast<unsigned long long>(
 			   __atomic_load_n(&ivars->syncPacketErrorCount, __ATOMIC_RELAXED)),
 		   static_cast<unsigned long long>(
@@ -1667,8 +1708,9 @@ void AkaiEieDriver::StopPlayback()
 	os_log(
 		OS_LOG_DEFAULT,
 		"AkaiEieDriver::StopPlayback enqueued=%{public}llu submitted=%{public}llu "
-		"underrun=%{public}llu dropped=%{public}llu nonzeroTransfers=%{public}llu "
+		"underrun=%{public}llu dropped=%{public}llu transfers=%{public}llu nonzeroTransfers=%{public}llu "
 		"nonzeroBytes=%{public}llu packetErrors=%{public}llu "
+		"scheduleRecoveries=%{public}llu noFeedback=%{public}llu feedbackMismatch=%{public}llu "
 		"syncErrors=%{public}llu syncMissing=%{public}llu syncReports=%{public}llu "
 		"syncFrames=%{public}llu syncPending=%{public}u",
 		static_cast<unsigned long long>(
@@ -1680,11 +1722,19 @@ void AkaiEieDriver::StopPlayback()
 		static_cast<unsigned long long>(
 			__atomic_load_n(&ivars->playbackDroppedFrames, __ATOMIC_RELAXED)),
 		static_cast<unsigned long long>(
+			__atomic_load_n(&ivars->playbackSubmittedTransferCount, __ATOMIC_RELAXED)),
+		static_cast<unsigned long long>(
 			__atomic_load_n(&ivars->playbackNonzeroTransfers, __ATOMIC_RELAXED)),
 		static_cast<unsigned long long>(
 			__atomic_load_n(&ivars->playbackNonzeroBytes, __ATOMIC_RELAXED)),
 		static_cast<unsigned long long>(
 			__atomic_load_n(&ivars->playbackPacketErrorCount, __ATOMIC_RELAXED)),
+		static_cast<unsigned long long>(
+			__atomic_load_n(&ivars->playbackScheduleRecoveryCount, __ATOMIC_RELAXED)),
+		static_cast<unsigned long long>(
+			__atomic_load_n(&ivars->playbackNoFeedbackCount, __ATOMIC_RELAXED)),
+		static_cast<unsigned long long>(
+			__atomic_load_n(&ivars->playbackFeedbackMismatchCount, __ATOMIC_RELAXED)),
 		static_cast<unsigned long long>(
 			__atomic_load_n(&ivars->syncPacketErrorCount, __ATOMIC_RELAXED)),
 		static_cast<unsigned long long>(

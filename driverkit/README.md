@@ -63,7 +63,8 @@ state, and real-time `IOOperationHandler` callbacks.
 
 3. `IOOperationHandler`
    - on `IOUserAudioIOOperationWriteEnd`, read the host output buffer for the
-     provided sample-time range, encode with
+     provided sample-time range wrapped by the device zero-timestamp period,
+     encode with
      `akai_eie::EncodePlaybackFrameFromFloat32`, and stage USB playback frames
    - on `IOUserAudioIOOperationBeginRead`, return silence until capture
      `AsyncIO` is implemented
@@ -171,28 +172,33 @@ AkaiEieDriver::ValidateSyncClock observed device-clock report frames=... attempt
 AkaiEieDriver::StartSyncTransfers started on endpoint 0x81
 AkaiEieDriver::StartPlayback started validated USB clock and initial silent output lead
 AkaiEieDriver::StartPlayback ready 48 kHz endpoint 0x02
-AkaiEieDriver::StartAudioClock validated device feedback base=240
+AkaiEieDriver::StartAudioClock validated device feedback base=...
 AkaiEieDevice::StartIO
 ```
 
-Before CoreAudio starts, a silent USB prime waits for one real device-clock
-report so the initial zero timestamp comes from hardware. As in the Linux
-reference, running feedback is read one endpoint report at a time and added to
-the frames elapsed counter; playback consumes the accumulated value when
-preparing each output transfer. Empty or out-of-phase sync reads are counted
+Before CoreAudio starts, a silent USB prime waits for a real device-clock
+report so the initial zero timestamp comes from hardware. Running feedback is
+read one report at a time and added to the frames elapsed counter; playback
+consumes the accumulated value when preparing each output transfer. DriverKit
+keeps 64 single-report reads queued so feedback remains fine grained without a
+two-millisecond scheduling cliff. Empty or out-of-phase sync reads are counted
 but are not treated as playback shutdown conditions. If USB setup or transfer
 submission fails, `StartDevice StartPlayback failed`, `ValidateSyncClock`, or
 `FailPlaybackStream` identifies the next transport issue.
-The current four-transfer plus 16 ms scheduling lead is reported to CoreAudio
+The current eight-transfer plus 16 ms scheduling lead is reported to CoreAudio
 as transport latency/safety offset; it is intentionally conservative while
 validating continuous output and must be reduced and measured before this is a
 low-latency studio-ready driver.
 Stopping playback logs ring/USB counters followed by
 `AkaiEieDriver::StopPlayback drained`. For audible playback evidence,
-`nonzeroTransfers` and `nonzeroBytes` must both be non-zero; for continuous
-feedback, `syncFrames` should advance with the USB output. `syncMissing` now
-shows the report cadence/phase observed on macOS rather than forcing a stream
-stop. Input is intentionally silent until capture is implemented.
+`nonzeroTransfers` should closely follow `transfers` while continuous
+non-silent output is active, and `nonzeroBytes` must be non-zero. For continuous
+feedback, `syncFrames` should advance with the USB output.
+`scheduleRecoveries` identifies loss of queued OUT runway; `noFeedback` and
+`feedbackMismatch` identify feedback starvation or a feedback total outside
+the accepted period window. `syncMissing` shows the report cadence/phase
+observed on macOS rather than forcing a stream stop. Input is intentionally
+silent until capture is implemented.
 
 ## Immediate Build Order
 

@@ -66,6 +66,10 @@ struct AkaiEieDriver_IVars
 	uint64_t playbackUnderrunFrames;
 	uint64_t playbackDroppedFrames;
 	uint64_t playbackPacketErrorCount;
+	uint64_t playbackScheduleRecoveryCount;
+	uint64_t playbackNoFeedbackCount;
+	uint64_t playbackFeedbackMismatchCount;
+	uint64_t playbackSubmittedTransferCount;
 	uint64_t playbackNonzeroTransfers;
 	uint64_t playbackNonzeroBytes;
 	uint64_t syncPacketErrorCount;

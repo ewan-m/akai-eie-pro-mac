@@ -29,8 +29,8 @@ CoreAudio HAL
   - send the reset control-transfer sequence after alt-setting selection
   - use an isochronous OUT playback endpoint
   - use bulk IN capture endpoint `0x86`
-  - ignore the empty/suspicious sync endpoint until hardware evidence says
-    otherwise
+  - schedule the small interface-1 isochronous IN sync endpoint and use its
+    validated device-frame advances to pace playback packets
 
 ## Code That Should Not Port
 
@@ -75,8 +75,10 @@ state, and real-time `IOOperationHandler` callbacks.
    - use `IOUSBHostInterface::CopyPipe` for playback and capture pipes
    - use `IOUSBHostPipe::IsochIO` for playback
    - use `IOUSBHostPipe::AsyncIO` for capture endpoint `0x86`
-   - update `IOUserAudioClockDevice::UpdateCurrentZeroTimestamp` from USB
-     completion timestamps and submitted hardware frame counts
+   - require the interface-1 crystal-clock feedback endpoint before starting
+     playback
+   - update `IOUserAudioClockDevice::UpdateCurrentZeroTimestamp` only from
+     validated feedback-frame counts and their USB completion timestamps
 
 ## Entitlements
 
@@ -150,29 +152,47 @@ launch-location guidance; `sysextd` logs provide the next validation failure.
 ## Playback Test
 
 The current transport is playback-only at `48000` Hz, configures the USB
-device itself, and claims only the output USB interface. Keep the interface
-connected for normal `Reload Driver` iterations; physically reconnect it only
-once if a previously crashed/replaced dext has left macOS with a stale
-attachment.
+device itself, and claims the output USB interface plus interface 1 for
+device-clock feedback. Keep the interface connected for normal `Reload Driver`
+iterations; physically reconnect it only once if a previously crashed/replaced
+dext has left macOS with a stale attachment.
 
 ```bash
 log stream --style compact --predicate 'eventMessage CONTAINS[c] "AkaiEie" OR process == "coreaudiod"'
 ```
 
-Starting audio should produce:
+Starting audio should produce logs like:
 
 ```text
 AkaiEieDriver::CaptureUsbProvider matched AKAI EIE Pro 09e8:0010 configuration 1
+AkaiEieDriver::OpenPlaybackInterface output endpoint 0x02 ... intervalMicroframes=1 ... periodMicroframes=40
+AkaiEieDriver::OpenSyncEndpoint found sync endpoint 0x81 maxPacket=64 intervalMicroframes=8 reportsPerPeriod=5
+AkaiEieDriver::ValidateSyncClock observed device-clock report frames=... attempt=...
+AkaiEieDriver::StartSyncTransfers started on endpoint 0x81
+AkaiEieDriver::StartPlayback started validated USB clock and initial silent output lead
 AkaiEieDriver::StartPlayback ready 48 kHz endpoint 0x02
+AkaiEieDriver::StartAudioClock validated device feedback base=240
 AkaiEieDevice::StartIO
-AkaiEieDriver::StartPlayback started with 3840 primed frames
 ```
 
-If USB setup or transfer submission fails, `StartDevice StartPlayback failed`
-or `PlaybackComplete resubmit failed` identifies the next transport issue.
+Before CoreAudio starts, a silent USB prime waits for one real device-clock
+report so the initial zero timestamp comes from hardware. As in the Linux
+reference, running feedback is read one endpoint report at a time and added to
+the frames elapsed counter; playback consumes the accumulated value when
+preparing each output transfer. Empty or out-of-phase sync reads are counted
+but are not treated as playback shutdown conditions. If USB setup or transfer
+submission fails, `StartDevice StartPlayback failed`, `ValidateSyncClock`, or
+`FailPlaybackStream` identifies the next transport issue.
+The current four-transfer plus 16 ms scheduling lead is reported to CoreAudio
+as transport latency/safety offset; it is intentionally conservative while
+validating continuous output and must be reduced and measured before this is a
+low-latency studio-ready driver.
 Stopping playback logs ring/USB counters followed by
-`AkaiEieDriver::StopPlayback drained`. Input is intentionally silent until
-capture is implemented.
+`AkaiEieDriver::StopPlayback drained`. For audible playback evidence,
+`nonzeroTransfers` and `nonzeroBytes` must both be non-zero; for continuous
+feedback, `syncFrames` should advance with the USB output. `syncMissing` now
+shows the report cadence/phase observed on macOS rather than forcing a stream
+stop. Input is intentionally silent until capture is implemented.
 
 ## Immediate Build Order
 

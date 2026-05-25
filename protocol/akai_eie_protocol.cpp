@@ -198,14 +198,10 @@ namespace akai_eie
 			break;
 		}
 
-		if (feedback_frames > 0)
-		{
-			const std::uint32_t low =
-				frames_wanted > 8 ? frames_wanted - 8 : 1;
-			const std::uint32_t high = frames_wanted + 8;
-			if (feedback_frames >= low && feedback_frames <= high)
-				frames_wanted = feedback_frames;
-		}
+		if (feedback_frames > 0 &&
+			feedback_frames + 1 >= frames_wanted &&
+			feedback_frames <= frames_wanted + 1)
+			frames_wanted = feedback_frames;
 
 		return frames_wanted;
 	}

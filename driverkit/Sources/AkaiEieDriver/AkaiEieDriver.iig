@@ -12,10 +12,23 @@
 
 #include "AkaiEieDevice.iig"
 #include "AkaiEieDriverConfig.hpp"
+#include "../../../protocol/akai_eie_protocol.hpp"
 
 using namespace AudioDriverKit;
 
 struct AkaiEiePlaybackTransfer
+{
+	OSSharedPtr<IOBufferMemoryDescriptor> dataBuffer;
+	OSSharedPtr<IOMemoryMap> dataMap;
+	OSSharedPtr<IOBufferMemoryDescriptor> frameListBuffer;
+	OSSharedPtr<IOMemoryMap> frameListMap;
+	OSSharedPtr<OSAction> completion;
+	uint8_t *dataAddress;
+	IOUSBIsochronousFrame *frameListAddress;
+	bool submitted;
+};
+
+struct AkaiEieSyncTransfer
 {
 	OSSharedPtr<IOBufferMemoryDescriptor> dataBuffer;
 	OSSharedPtr<IOMemoryMap> dataMap;
@@ -35,7 +48,9 @@ struct AkaiEieDriver_IVars
 	OSSharedPtr<IOUSBHostInterface> playbackInterface;
 	OSSharedPtr<IOUSBHostInterface> dataInterface;
 	OSSharedPtr<IOUSBHostPipe> playbackPipe;
+	OSSharedPtr<IOUSBHostPipe> syncPipe;
 	AkaiEiePlaybackTransfer playbackTransfers[akai_eie_driver::kPlaybackTransferCount];
+	AkaiEieSyncTransfer syncTransfers[akai_eie_driver::kSyncTransferCount];
 	OSSharedPtr<OSString> driverName;
 	OSSharedPtr<OSString> deviceName;
 	OSSharedPtr<OSString> deviceUid;
@@ -45,12 +60,30 @@ struct AkaiEieDriver_IVars
 	uint64_t playbackReadFrame;
 	uint64_t playbackWriteFrame;
 	uint64_t nextUsbFrame;
+	uint64_t playbackTimestampFrames;
 	uint64_t playbackEnqueuedFrames;
 	uint64_t playbackSubmittedFrames;
 	uint64_t playbackUnderrunFrames;
 	uint64_t playbackDroppedFrames;
 	uint64_t playbackPacketErrorCount;
+	uint64_t playbackNonzeroTransfers;
+	uint64_t playbackNonzeroBytes;
+	uint64_t syncPacketErrorCount;
+	uint64_t syncMissingReportCount;
+	uint64_t syncValidReportCount;
+	uint64_t syncFeedbackFrames;
+	uint64_t syncClockBaseFrames;
+	uint64_t syncLastHostTime;
 	uint32_t playbackInFlight;
+	uint32_t syncInFlight;
+	uint32_t syncFramesElapsed;
+	uint32_t playbackIntervalMicroframes;
+	uint32_t syncIntervalMicroframes;
+	uint32_t syncReportsPerPlaybackPeriod;
+	uint16_t playbackMaxPacketSize;
+	uint16_t syncMaxPacketSize;
+	uint8_t syncEndpointAddress;
+	akai_eie::PlaybackTimingState playbackTimingState;
 	bool usbDeviceOpen;
 	bool playbackInterfaceOpen;
 	bool dataInterfaceOpen;
@@ -75,17 +108,29 @@ public:
 	virtual void PlaybackComplete(OSAction *action,
 								  IOReturn status) TYPE(IOUSBHostPipe::CompleteAsyncIsochIO);
 
+	virtual void SyncComplete(OSAction *action,
+							  IOReturn status) TYPE(IOUSBHostPipe::CompleteAsyncIsochIO);
+
+	kern_return_t StartAudioClock() LOCALONLY;
+
 private:
 	kern_return_t CaptureUsbProvider(IOService *provider) LOCALONLY;
 	kern_return_t CreateAudioDevice() LOCALONLY;
 	kern_return_t StartPlayback() LOCALONLY;
 	void StopPlayback() LOCALONLY;
 	kern_return_t OpenPlaybackInterface() LOCALONLY;
+	kern_return_t OpenSyncEndpoint() LOCALONLY;
 	kern_return_t SendPlaybackSetup() LOCALONLY;
 	kern_return_t CreatePlaybackTransfers() LOCALONLY;
-	kern_return_t StartPrimedPlaybackTransfers() LOCALONLY;
+	kern_return_t CreateSyncTransfers() LOCALONLY;
+	kern_return_t ValidateSyncClock() LOCALONLY;
+	kern_return_t StartSyncTransfers() LOCALONLY;
+	kern_return_t StartPlaybackTransfers() LOCALONLY;
 	kern_return_t SubmitPlaybackTransfer(uint32_t index) LOCALONLY;
+	kern_return_t SubmitSyncTransfer(uint32_t index) LOCALONLY;
+	void FailPlaybackStream(IOReturn status) LOCALONLY;
 	void FinishPlaybackStop() LOCALONLY;
+	void ReleaseSyncResources() LOCALONLY;
 	void ReleasePlaybackResources() LOCALONLY;
 	void CloseUsbProvider() LOCALONLY;
 };

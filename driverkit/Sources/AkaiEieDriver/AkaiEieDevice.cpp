@@ -113,8 +113,10 @@ bool AkaiEieDevice::init(IOUserAudioDriver *driver,
 		return false;
 	}
 
-	(void)SetInputSafetyOffset(akai_eie_driver::kSafetyOffsetFrames);
-	(void)SetOutputSafetyOffset(akai_eie_driver::kSafetyOffsetFrames);
+	(void)SetInputSafetyOffset(akai_eie_driver::kInputSafetyOffsetFrames);
+	(void)SetOutputSafetyOffset(akai_eie_driver::kOutputSafetyOffsetFrames);
+	(void)SetInputLatency(0);
+	(void)SetOutputLatency(akai_eie_driver::kOutputTransportLatencyFrames);
 	(void)SetPreferredChannelsForStereo(1, 2);
 
 	IOUserAudioChannelLabel labels[akai_eie_driver::kChannelCount] = {
@@ -131,15 +133,6 @@ bool AkaiEieDevice::init(IOUserAudioDriver *driver,
 	{
 		os_log(OS_LOG_DEFAULT,
 			   "AkaiEieDevice::init ConfigureStreams failed 0x%{public}x",
-			   ret);
-		return false;
-	}
-
-	ret = ConfigureZeroTimestampTimer();
-	if (ret != kIOReturnSuccess)
-	{
-		os_log(OS_LOG_DEFAULT,
-			   "AkaiEieDevice::init ConfigureZeroTimestampTimer failed 0x%{public}x",
 			   ret);
 		return false;
 	}
@@ -193,37 +186,17 @@ void AkaiEieDevice::SetTransportDriver(AkaiEieDriver *driver)
 	ivars->transportDriver = driver;
 }
 
-kern_return_t AkaiEieDevice::ConfigureZeroTimestampTimer()
+void AkaiEieDevice::UpdatePlaybackTimestamp(uint64_t sampleTime,
+											uint64_t hostTime)
 {
-	OSSharedPtr<IODispatchQueue> workQueue = GetWorkQueue();
-	if (!workQueue)
-		return kIOReturnNoMemory;
+	if (ivars == nullptr ||
+		!__atomic_load_n(&ivars->ioStarted, __ATOMIC_ACQUIRE))
+	{
+		return;
+	}
 
-	kern_return_t ret = IOTimerDispatchSource::Create(
-		workQueue.get(), ivars->zeroTimestampTimer.attach());
-	if (ret != kIOReturnSuccess)
-		return ret;
-
-	OSSharedPtr<OSAction> timerAction;
-	ret = CreateActionTimerOccurred(0, timerAction.attach());
-	if (ret != kIOReturnSuccess)
-		return ret;
-
-	ret = ivars->zeroTimestampTimer->SetHandler(timerAction.get());
-	if (ret != kIOReturnSuccess)
-		return ret;
-
-	mach_timebase_info_data_t timebase{};
-	ret = mach_timebase_info(&timebase);
-	if (ret != kIOReturnSuccess || timebase.numer == 0)
-		return ret != kIOReturnSuccess ? ret : kIOReturnError;
-
-	const uint64_t timestampIntervalNs =
-		NSEC_PER_SEC / akai_eie_driver::kZeroTimestampCadenceDivisor;
-	ivars->zeroTimestampIntervalTicks =
-		timestampIntervalNs * timebase.denom / timebase.numer;
-	return ivars->zeroTimestampIntervalTicks == 0 ? kIOReturnError
-												  : kIOReturnSuccess;
+	ivars->zeroTimestampSampleTime = sampleTime;
+	UpdateCurrentZeroTimestamp(sampleTime, hostTime);
 }
 
 kern_return_t AkaiEieDevice::ConfigureStreams(IOUserAudioDriver *driver)
@@ -336,7 +309,10 @@ kern_return_t AkaiEieDevice::StartIO(IOUserAudioStartStopFlags flags)
 	__atomic_store_n(&ivars->writeOperationCount, 0, __ATOMIC_RELAXED);
 	__atomic_store_n(&ivars->readOperationCount, 0, __ATOMIC_RELAXED);
 
-	ret = StartZeroTimestampTimer();
+	if (ivars->transportDriver == nullptr)
+		ret = kIOReturnNotReady;
+	else
+		ret = ivars->transportDriver->StartAudioClock();
 	if (ret != kIOReturnSuccess)
 	{
 		ivars->ioStarted = false;
@@ -351,61 +327,6 @@ kern_return_t AkaiEieDevice::StartIO(IOUserAudioStartStopFlags flags)
 
 	os_log(OS_LOG_DEFAULT, "AkaiEieDevice::StartIO");
 	return kIOReturnSuccess;
-}
-
-kern_return_t AkaiEieDevice::StartZeroTimestampTimer()
-{
-	if (!ivars->zeroTimestampTimer)
-		return kIOReturnNoDevice;
-
-	ivars->zeroTimestampSampleTime = 0;
-	const uint64_t hostTime = mach_absolute_time();
-	ivars->zeroTimestampNextHostTime =
-		hostTime + ivars->zeroTimestampIntervalTicks;
-	UpdateCurrentZeroTimestamp(ivars->zeroTimestampSampleTime, hostTime);
-
-	kern_return_t ret = ivars->zeroTimestampTimer->SetEnable(true);
-	if (ret != kIOReturnSuccess)
-		return ret;
-
-	ret = ivars->zeroTimestampTimer->WakeAtTime(
-		kIOTimerClockMachAbsoluteTime,
-		ivars->zeroTimestampNextHostTime,
-		0);
-	if (ret != kIOReturnSuccess)
-		(void)ivars->zeroTimestampTimer->SetEnable(false);
-	return ret;
-}
-
-void AkaiEieDevice::StopZeroTimestampTimer()
-{
-	if (ivars->zeroTimestampTimer)
-		(void)ivars->zeroTimestampTimer->SetEnable(false);
-}
-
-void AkaiEieDevice::TimerOccurred_Impl(OSAction *action, uint64_t time)
-{
-	(void)action;
-	(void)time;
-	if (ivars == nullptr || !ivars->ioStarted || !ivars->zeroTimestampTimer)
-		return;
-
-	ivars->zeroTimestampSampleTime += ivars->zeroTimestampPeriod;
-	UpdateCurrentZeroTimestamp(
-		ivars->zeroTimestampSampleTime,
-		ivars->zeroTimestampNextHostTime);
-	ivars->zeroTimestampNextHostTime += ivars->zeroTimestampIntervalTicks;
-
-	const kern_return_t ret = ivars->zeroTimestampTimer->WakeAtTime(
-		kIOTimerClockMachAbsoluteTime,
-		ivars->zeroTimestampNextHostTime,
-		0);
-	if (ret != kIOReturnSuccess)
-	{
-		os_log(OS_LOG_DEFAULT,
-			   "AkaiEieDevice::TimerOccurred WakeAtTime failed 0x%{public}x",
-			   ret);
-	}
 }
 
 kern_return_t AkaiEieDevice::MapStreamBuffers()
@@ -479,7 +400,6 @@ kern_return_t AkaiEieDevice::StopIO(IOUserAudioStartStopFlags flags)
 				__atomic_load_n(&ivars->readOperationCount, __ATOMIC_RELAXED)),
 			static_cast<unsigned long long>(ivars->zeroTimestampSampleTime));
 		ivars->ioStarted = false;
-		StopZeroTimestampTimer();
 		if (ivars->outputStream)
 			(void)ivars->outputStream->SetStreamIsActive(false);
 		if (ivars->inputStream)
@@ -550,9 +470,7 @@ void AkaiEieDevice::free()
 {
 	if (ivars != nullptr)
 	{
-		StopZeroTimestampTimer();
 		UnmapStreamBuffers();
-		ivars->zeroTimestampTimer.reset();
 		ivars->outputStream.reset();
 		ivars->inputStream.reset();
 		ivars->outputBuffer.reset();

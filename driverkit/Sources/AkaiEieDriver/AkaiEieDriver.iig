@@ -75,27 +75,6 @@ struct AkaiEieDriver_IVars
 	uint64_t captureWriteFrame;
 	uint64_t nextUsbFrame;
 	uint64_t playbackTimestampFrames;
-	uint64_t playbackEnqueuedFrames;
-	uint64_t playbackSubmittedFrames;
-	uint64_t playbackUnderrunFrames;
-	uint64_t playbackDroppedFrames;
-	uint64_t playbackPacketErrorCount;
-	uint64_t playbackScheduleRecoveryCount;
-	uint64_t playbackNoFeedbackCount;
-	uint64_t playbackFeedbackMismatchCount;
-	uint64_t playbackSubmittedTransferCount;
-	uint64_t playbackNonzeroTransfers;
-	uint64_t playbackNonzeroBytes;
-	uint64_t captureSubmittedTransferCount;
-	uint64_t captureCompletedTransferCount;
-	uint64_t captureDecodedFrames;
-	uint64_t captureReadFrames;
-	uint64_t captureOverrunFrames;
-	uint64_t captureUnderrunFrames;
-	uint64_t captureErrorCount;
-	uint64_t syncPacketErrorCount;
-	uint64_t syncMissingReportCount;
-	uint64_t syncValidReportCount;
 	uint64_t syncFeedbackFrames;
 	uint64_t syncClockBaseFrames;
 	uint64_t syncLastHostTime;
@@ -116,7 +95,6 @@ struct AkaiEieDriver_IVars
 	bool playbackInterfaceOpen;
 	bool dataInterfaceOpen;
 	bool playbackHasReceivedFrames;
-	bool captureHasReceivedFrames;
 	bool playbackTransfersStarted;
 	bool playbackStopPending;
 	bool playbackRunning;
@@ -134,8 +112,8 @@ public:
 									  IOUserAudioStartStopFlags flags) override LOCALONLY;
 	virtual kern_return_t StopDevice(IOUserAudioObjectID objectId,
 									 IOUserAudioStartStopFlags flags) override LOCALONLY;
-	void EnqueuePlaybackFrames(const float *frames, uint32_t frameCount) LOCALONLY;
-	void CopyCaptureFrames(float *frames, uint32_t frameCount) LOCALONLY;
+	kern_return_t EnqueuePlaybackFrames(const float *frames, uint32_t frameCount) LOCALONLY;
+	kern_return_t CopyCaptureFrames(float *frames, uint32_t frameCount) LOCALONLY;
 	virtual void PlaybackComplete(OSAction *action,
 								  IOReturn status) TYPE(IOUSBHostPipe::CompleteAsyncIsochIO);
 
@@ -169,7 +147,7 @@ private:
 	kern_return_t SubmitCaptureTransfer(uint32_t index) LOCALONLY;
 	void FailPlaybackStream(IOReturn status) LOCALONLY;
 	void FinishPlaybackStop() LOCALONLY;
-	void StoreCaptureBytes(const uint8_t *bytes, uint32_t byteCount) LOCALONLY;
+	kern_return_t StoreCaptureBytes(const uint8_t *bytes, uint32_t byteCount) LOCALONLY;
 	void ReleaseCaptureResources() LOCALONLY;
 	void ReleaseSyncResources() LOCALONLY;
 	void ReleasePlaybackResources() LOCALONLY;

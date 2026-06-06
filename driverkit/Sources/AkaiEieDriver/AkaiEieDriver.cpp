@@ -2,7 +2,6 @@
 #include <DriverKit/DriverKit.h>
 #include <USBDriverKit/AppleUSBDescriptorParsing.h>
 #include <USBDriverKit/USBDriverKit.h>
-#include <os/log.h>
 #include <string.h>
 
 #include "AkaiEieDriver.h"
@@ -12,17 +11,11 @@
 bool AkaiEieDriver::init()
 {
 	if (!super::init())
-	{
-		os_log(OS_LOG_DEFAULT, "AkaiEieDriver::init super init failed");
 		return false;
-	}
 
 	ivars = IONewZero(AkaiEieDriver_IVars, 1);
 	if (ivars == nullptr)
-	{
-		os_log(OS_LOG_DEFAULT, "AkaiEieDriver::init failed to allocate ivars");
 		return false;
-	}
 
 	ivars->driverName = OSSharedPtr<OSString>(
 		OSString::withCString(akai_eie_driver::kDriverName),
@@ -42,26 +35,16 @@ bool AkaiEieDriver::init()
 
 	if (!ivars->driverName || !ivars->deviceName || !ivars->deviceUid ||
 		!ivars->modelUid || !ivars->manufacturerName)
-	{
-		os_log(OS_LOG_DEFAULT, "AkaiEieDriver::init failed to allocate strings");
 		return false;
-	}
 
 	return true;
 }
 
 kern_return_t IMPL(AkaiEieDriver, Start)
 {
-	os_log(OS_LOG_DEFAULT, "AkaiEieDriver::Start");
-
 	kern_return_t ret = Start(provider, SUPERDISPATCH);
 	if (ret != kIOReturnSuccess)
-	{
-		os_log(OS_LOG_DEFAULT,
-			   "AkaiEieDriver::Start super failed 0x%{public}x",
-			   ret);
 		return ret;
-	}
 
 	ret = SetName(ivars->driverName.get());
 	if (ret != kIOReturnSuccess)
@@ -89,16 +72,11 @@ kern_return_t IMPL(AkaiEieDriver, Start)
 	ret = RegisterService();
 	if (ret != kIOReturnSuccess)
 	{
-		os_log(OS_LOG_DEFAULT,
-			   "AkaiEieDriver::Start RegisterService failed 0x%{public}x",
-			   ret);
 		ivars->audioDevice.reset();
 		CloseUsbProvider();
 		return ret;
 	}
 
-	os_log(OS_LOG_DEFAULT,
-		   "AkaiEieDriver::Start registered AudioDriverKit device for AKAI EIE Pro");
 	return kIOReturnSuccess;
 }
 
@@ -106,44 +84,25 @@ kern_return_t AkaiEieDriver::CaptureUsbProvider(IOService *provider)
 {
 	IOUSBHostDevice *usbDevice = OSDynamicCast(IOUSBHostDevice, provider);
 	if (usbDevice == nullptr)
-	{
-		os_log(OS_LOG_DEFAULT,
-			   "AkaiEieDriver::CaptureUsbProvider provider is not IOUSBHostDevice");
 		return kIOReturnBadArgument;
-	}
 
 	ivars->usbDevice = OSSharedPtr<IOUSBHostDevice>(usbDevice, OSRetain);
 
 	const IOUSBDeviceDescriptor *descriptor =
 		ivars->usbDevice->CopyDeviceDescriptor();
 	if (descriptor == nullptr)
-	{
-		os_log(OS_LOG_DEFAULT,
-			   "AkaiEieDriver::CaptureUsbProvider missing device descriptor");
 		return kIOReturnNoDevice;
-	}
 
 	const uint16_t vendorId = descriptor->idVendor;
 	const uint16_t productId = descriptor->idProduct;
 	IOUSBHostFreeDescriptor(descriptor);
 
 	if (vendorId != akai_eie::kVendorId || productId != akai_eie::kProductId)
-	{
-		os_log(OS_LOG_DEFAULT,
-			   "AkaiEieDriver::CaptureUsbProvider unexpected USB id %{public}04x:%{public}04x",
-			   vendorId,
-			   productId);
 		return kIOReturnUnsupported;
-	}
 
 	kern_return_t ret = ivars->usbDevice->Open(this, 0, 0);
 	if (ret != kIOReturnSuccess)
-	{
-		os_log(OS_LOG_DEFAULT,
-			   "AkaiEieDriver::CaptureUsbProvider Open failed 0x%{public}x",
-			   ret);
 		return ret;
-	}
 	ivars->usbDeviceOpen = true;
 
 	ret = ivars->usbDevice->SetConfiguration(
@@ -151,19 +110,10 @@ kern_return_t AkaiEieDriver::CaptureUsbProvider(IOService *provider)
 		true);
 	if (ret != kIOReturnSuccess)
 	{
-		os_log(OS_LOG_DEFAULT,
-			   "AkaiEieDriver::CaptureUsbProvider SetConfiguration(%{public}u) failed 0x%{public}x",
-			   akai_eie_driver::kUsbConfigurationValue,
-			   ret);
 		CloseUsbProvider();
 		return ret;
 	}
 
-	os_log(OS_LOG_DEFAULT,
-		   "AkaiEieDriver::CaptureUsbProvider matched AKAI EIE Pro %{public}04x:%{public}04x configuration %{public}u",
-		   vendorId,
-		   productId,
-		   akai_eie_driver::kUsbConfigurationValue);
 	return kIOReturnSuccess;
 }
 
@@ -193,15 +143,7 @@ kern_return_t AkaiEieDriver::CreateAudioDevice()
 		return ret;
 
 	ret = AddObject(ivars->audioDevice.get());
-	if (ret != kIOReturnSuccess)
-	{
-		os_log(OS_LOG_DEFAULT,
-			   "AkaiEieDriver::CreateAudioDevice AddObject failed 0x%{public}x",
-			   ret);
-		return ret;
-	}
-
-	return kIOReturnSuccess;
+	return ret;
 }
 
 kern_return_t AkaiEieDriver::StartDevice(IOUserAudioObjectID objectId,
@@ -215,12 +157,7 @@ kern_return_t AkaiEieDriver::StartDevice(IOUserAudioObjectID objectId,
 
 	kern_return_t ret = StartPlayback();
 	if (ret != kIOReturnSuccess)
-	{
-		os_log(OS_LOG_DEFAULT,
-			   "AkaiEieDriver::StartDevice StartPlayback failed 0x%{public}x",
-			   ret);
 		return ret;
-	}
 
 	ret = super::StartDevice(objectId, flags);
 	if (ret != kIOReturnSuccess)
@@ -248,9 +185,6 @@ kern_return_t AkaiEieDriver::StartAudioClock()
 	ivars->playbackTimestampFrames = 0;
 	ivars->audioDevice->UpdatePlaybackTimestamp(0, hostTime);
 	(void)ivars->audioDevice->SetClockIsStable(true);
-	os_log(OS_LOG_DEFAULT,
-		   "AkaiEieDriver::StartAudioClock validated device feedback base=%{public}llu",
-		   static_cast<unsigned long long>(feedbackFrames));
 	return kIOReturnSuccess;
 }
 
@@ -306,28 +240,16 @@ kern_return_t AkaiEieDriver::OpenSyncEndpoint()
 	(void)ivars->usbDevice->DestroyInterfaceIterator(iterator);
 
 	if (!dataInterface)
-	{
-		os_log(OS_LOG_DEFAULT,
-			   "AkaiEieDriver::OpenSyncEndpoint interface 1 not found");
 		return kIOReturnNoDevice;
-	}
 
 	ret = dataInterface->Open(this, 0, nullptr);
 	if (ret != kIOReturnSuccess)
-	{
-		os_log(OS_LOG_DEFAULT,
-			   "AkaiEieDriver::OpenSyncEndpoint interface 1 open failed 0x%{public}x",
-			   ret);
 		return ret;
-	}
 
 	ret = dataInterface->SelectAlternateSetting(
 		akai_eie_driver::kPlaybackAlternateSetting);
 	if (ret != kIOReturnSuccess)
 	{
-		os_log(OS_LOG_DEFAULT,
-			   "AkaiEieDriver::OpenSyncEndpoint interface 1 alt setting failed 0x%{public}x",
-			   ret);
 		dataInterface->Close(this, 0);
 		return ret;
 	}
@@ -400,13 +322,6 @@ kern_return_t AkaiEieDriver::OpenSyncEndpoint()
 			IOUSBGetEndpointDirection(endpointDescriptor) ==
 			kIOUSBEndpointDirectionIn;
 
-		os_log(OS_LOG_DEFAULT,
-			   "AkaiEieDriver::OpenSyncEndpoint interface 1 endpoint "
-			   "0x%{public}02x maxPacket=%{public}u intervalMicroframes=%{public}u "
-			   "bInterval=%{public}u isoc=%{public}d bulk=%{public}d in=%{public}d",
-			   endpointAddress, maxPacket, intervalMicroframes,
-			   endpointDescriptor->bInterval, isIsochronous, isBulk, isIn);
-
 		if (isIsochronous && isIn &&
 			maxPacket <= akai_eie_driver::kSyncMaxPacketBytes)
 		{
@@ -426,16 +341,13 @@ kern_return_t AkaiEieDriver::OpenSyncEndpoint()
 
 	if (syncAddress == 0)
 	{
-		os_log(OS_LOG_DEFAULT,
-			   "AkaiEieDriver::OpenSyncEndpoint no sync endpoint found on interface 1");
 		dataInterface->Close(this, 0);
 		return kIOReturnNotFound;
 	}
 	if (captureAddress == 0)
 	{
-		os_log(OS_LOG_DEFAULT,
-			   "AkaiEieDriver::OpenSyncEndpoint no capture endpoint 0x%{public}02x found on interface 1; input will stay silent",
-			   akai_eie::kKnownCaptureEndpointAddress);
+		dataInterface->Close(this, 0);
+		return kIOReturnNotFound;
 	}
 
 	const uint32_t playbackPeriodMicroframes =
@@ -445,10 +357,6 @@ kern_return_t AkaiEieDriver::OpenSyncEndpoint()
 		playbackPeriodMicroframes == 0 ||
 		playbackPeriodMicroframes % syncIntervalMicroframes != 0)
 	{
-		os_log(OS_LOG_DEFAULT,
-			   "AkaiEieDriver::OpenSyncEndpoint incompatible sync interval "
-			   "sync=%{public}u playbackPeriod=%{public}u microframes",
-			   syncIntervalMicroframes, playbackPeriodMicroframes);
 		dataInterface->Close(this, 0);
 		return kIOReturnUnsupported;
 	}
@@ -458,40 +366,22 @@ kern_return_t AkaiEieDriver::OpenSyncEndpoint()
 		syncReportsPerPlaybackPeriod >
 			akai_eie_driver::kSyncMaxReportsPerPlaybackPeriod)
 	{
-		os_log(OS_LOG_DEFAULT,
-			   "AkaiEieDriver::OpenSyncEndpoint unsupported sync reports per playback period %{public}u",
-			   syncReportsPerPlaybackPeriod);
 		dataInterface->Close(this, 0);
 		return kIOReturnUnsupported;
 	}
 
-	os_log(OS_LOG_DEFAULT,
-		   "AkaiEieDriver::OpenSyncEndpoint found sync endpoint 0x%{public}02x "
-		   "maxPacket=%{public}u intervalMicroframes=%{public}u reportsPerPeriod=%{public}u",
-		   syncAddress, syncMaxPacket, syncIntervalMicroframes,
-		   syncReportsPerPlaybackPeriod);
-
 	ret = dataInterface->CopyPipe(syncAddress, ivars->syncPipe.attach());
 	if (ret != kIOReturnSuccess || !ivars->syncPipe)
 	{
-		os_log(OS_LOG_DEFAULT,
-			   "AkaiEieDriver::OpenSyncEndpoint CopyPipe failed 0x%{public}x",
-			   ret);
 		dataInterface->Close(this, 0);
 		return ret != kIOReturnSuccess ? ret : kIOReturnNoDevice;
 	}
-	if (captureAddress != 0)
+	ret = dataInterface->CopyPipe(captureAddress, ivars->capturePipe.attach());
+	if (ret != kIOReturnSuccess || !ivars->capturePipe)
 	{
-		ret = dataInterface->CopyPipe(captureAddress, ivars->capturePipe.attach());
-		if (ret != kIOReturnSuccess || !ivars->capturePipe)
-		{
-			os_log(OS_LOG_DEFAULT,
-				   "AkaiEieDriver::OpenSyncEndpoint capture CopyPipe failed 0x%{public}x; input will stay silent",
-				   ret);
-			ivars->capturePipe.reset();
-			captureAddress = 0;
-			captureMaxPacket = 0;
-		}
+		ivars->syncPipe.reset();
+		dataInterface->Close(this, 0);
+		return ret != kIOReturnSuccess ? ret : kIOReturnNoDevice;
 	}
 
 	ivars->dataInterface = dataInterface;
@@ -502,14 +392,6 @@ kern_return_t AkaiEieDriver::OpenSyncEndpoint()
 	ivars->syncReportsPerPlaybackPeriod = syncReportsPerPlaybackPeriod;
 	ivars->captureEndpointAddress = captureAddress;
 	ivars->captureMaxPacketSize = captureMaxPacket;
-
-	if (captureAddress != 0)
-	{
-		os_log(OS_LOG_DEFAULT,
-			   "AkaiEieDriver::OpenSyncEndpoint found capture endpoint 0x%{public}02x "
-			   "maxPacket=%{public}u",
-			   captureAddress, captureMaxPacket);
-	}
 
 	return kIOReturnSuccess;
 }
@@ -688,11 +570,6 @@ kern_return_t AkaiEieDriver::SubmitCaptureTransfer(uint32_t index)
 		transfer.submitted = false;
 		--ivars->captureInFlight;
 	}
-	else
-	{
-		__atomic_add_fetch(
-			&ivars->captureSubmittedTransferCount, 1, __ATOMIC_RELAXED);
-	}
 	return ret;
 }
 
@@ -702,9 +579,7 @@ kern_return_t AkaiEieDriver::ValidateSyncClock()
 		return kIOReturnNotReady;
 
 	AkaiEieSyncTransfer &transfer = ivars->syncTransfers[0];
-	uint32_t lastCompleteCount = 0;
 	uint64_t lastHostTime = 0;
-	uint8_t lastFeedback = 0;
 	for (uint32_t attempt = 0;
 		 attempt < akai_eie_driver::kSyncPrimeAttemptCount;
 		 ++attempt)
@@ -731,29 +606,15 @@ kern_return_t AkaiEieDriver::ValidateSyncClock()
 			return ret;
 
 		const IOUSBIsochronousFrame &frame = transfer.frameListAddress[0];
-		lastCompleteCount = frame.completeCount;
 		if (frame.status != kIOReturnSuccess)
-		{
-			__atomic_add_fetch(
-				&ivars->syncPacketErrorCount, 1, __ATOMIC_RELAXED);
 			continue;
-		}
 		if (frame.completeCount == 0)
-		{
-			__atomic_add_fetch(
-				&ivars->syncMissingReportCount, 1, __ATOMIC_RELAXED);
 			continue;
-		}
 
 		const uint8_t feedback = transfer.dataAddress[0];
 		lastHostTime = frame.timeStamp;
-		lastFeedback = feedback;
 		if (!akai_eie::IsReasonableSyncFeedback(feedback))
-		{
-			__atomic_add_fetch(
-				&ivars->syncMissingReportCount, 1, __ATOMIC_RELAXED);
 			continue;
-		}
 
 		if (lastHostTime != 0)
 		{
@@ -767,23 +628,10 @@ kern_return_t AkaiEieDriver::ValidateSyncClock()
 				&ivars->syncFramesElapsed,
 				0,
 				__ATOMIC_RELEASE);
-			__atomic_store_n(
-				&ivars->syncValidReportCount,
-				1,
-				__ATOMIC_RELEASE);
-			os_log(OS_LOG_DEFAULT,
-				   "AkaiEieDriver::ValidateSyncClock observed device-clock report frames=%{public}u attempt=%{public}u",
-				   feedback,
-				   attempt + 1);
 			return kIOReturnSuccess;
 		}
 	}
 
-	os_log(OS_LOG_DEFAULT,
-		   "AkaiEieDriver::ValidateSyncClock did not observe a device-clock report "
-		   "lastLength=%{public}u lastValue=%{public}u hostTime=%{public}llu",
-		   lastCompleteCount, lastFeedback,
-		   static_cast<unsigned long long>(lastHostTime));
 	return kIOReturnNotResponding;
 }
 
@@ -798,9 +646,6 @@ kern_return_t AkaiEieDriver::StartSyncTransfers()
 			return ret;
 	}
 
-	os_log(OS_LOG_DEFAULT,
-		   "AkaiEieDriver::StartSyncTransfers started on endpoint 0x%{public}02x",
-		   ivars->syncEndpointAddress);
 	return kIOReturnSuccess;
 }
 
@@ -815,9 +660,6 @@ kern_return_t AkaiEieDriver::StartCaptureTransfers()
 			return ret;
 	}
 
-	os_log(OS_LOG_DEFAULT,
-		   "AkaiEieDriver::StartCaptureTransfers started on endpoint 0x%{public}02x",
-		   ivars->captureEndpointAddress);
 	return kIOReturnSuccess;
 }
 
@@ -829,12 +671,7 @@ kern_return_t AkaiEieDriver::OpenPlaybackInterface()
 	uintptr_t iterator = 0;
 	kern_return_t ret = ivars->usbDevice->CreateInterfaceIterator(&iterator);
 	if (ret != kIOReturnSuccess)
-	{
-		os_log(OS_LOG_DEFAULT,
-			   "AkaiEieDriver::OpenPlaybackInterface CreateInterfaceIterator failed 0x%{public}x",
-			   ret);
 		return ret;
-	}
 
 	while (!ivars->playbackInterface)
 	{
@@ -853,63 +690,35 @@ kern_return_t AkaiEieDriver::OpenPlaybackInterface()
 		if (configuration != nullptr)
 			IOUSBHostFreeDescriptor(configuration);
 
-		os_log(OS_LOG_DEFAULT,
-			   "AkaiEieDriver::OpenPlaybackInterface found interface %{public}u",
-			   interfaceNumber);
 		if (interfaceNumber == akai_eie_driver::kPlaybackInterfaceNumber)
 			ivars->playbackInterface = candidate;
 	}
 	(void)ivars->usbDevice->DestroyInterfaceIterator(iterator);
 
 	if (!ivars->playbackInterface)
-	{
-		os_log(OS_LOG_DEFAULT,
-			   "AkaiEieDriver::OpenPlaybackInterface output interface unavailable 0x%{public}x",
-			   ret);
 		return kIOReturnNoDevice;
-	}
 
 	ret = ivars->playbackInterface->Open(this, 0, nullptr);
 	if (ret != kIOReturnSuccess)
-	{
-		os_log(OS_LOG_DEFAULT,
-			   "AkaiEieDriver::OpenPlaybackInterface output Open failed 0x%{public}x",
-			   ret);
 		return ret;
-	}
 	ivars->playbackInterfaceOpen = true;
 
 	ret = ivars->playbackInterface->SelectAlternateSetting(
 		akai_eie_driver::kPlaybackAlternateSetting);
 	if (ret != kIOReturnSuccess)
-	{
-		os_log(OS_LOG_DEFAULT,
-			   "AkaiEieDriver::OpenPlaybackInterface output alternate setting failed 0x%{public}x",
-			   ret);
 		return ret;
-	}
 
 	ret = ivars->playbackInterface->CopyPipe(
 		akai_eie_driver::kPlaybackEndpointAddress,
 		ivars->playbackPipe.attach());
 	if (ret != kIOReturnSuccess || !ivars->playbackPipe)
-	{
-		os_log(OS_LOG_DEFAULT,
-			   "AkaiEieDriver::OpenPlaybackInterface output pipe failed 0x%{public}x",
-			   ret);
 		return ret != kIOReturnSuccess ? ret : kIOReturnNoDevice;
-	}
 
 	IOUSBStandardEndpointDescriptors endpointDescriptors{};
 	ret = ivars->playbackPipe->GetDescriptors(
 		&endpointDescriptors, kIOUSBGetEndpointDescriptorCurrentPolicy);
 	if (ret != kIOReturnSuccess)
-	{
-		os_log(OS_LOG_DEFAULT,
-			   "AkaiEieDriver::OpenPlaybackInterface output descriptor failed 0x%{public}x",
-			   ret);
 		return ret;
-	}
 	if (endpointDescriptors.descriptor.bEndpointAddress !=
 		akai_eie_driver::kPlaybackEndpointAddress)
 		return kIOReturnUnsupported;
@@ -925,20 +734,11 @@ kern_return_t AkaiEieDriver::OpenPlaybackInterface()
 	const uint32_t playbackPeriodMicroframes =
 		ivars->playbackIntervalMicroframes *
 		akai_eie_driver::kPlaybackIsoPacketCount;
-	os_log(OS_LOG_DEFAULT,
-		   "AkaiEieDriver::OpenPlaybackInterface output endpoint 0x%{public}02x "
-		   "speed=%{public}u maxPacket=%{public}u intervalMicroframes=%{public}u "
-		   "bInterval=%{public}u periodMicroframes=%{public}u",
-		   endpointDescriptors.descriptor.bEndpointAddress, usbSpeed,
-		   ivars->playbackMaxPacketSize, ivars->playbackIntervalMicroframes,
-		   endpointDescriptors.descriptor.bInterval, playbackPeriodMicroframes);
 	if (usbSpeed != kIOUSBHostConnectionSpeedHigh ||
 		ivars->playbackMaxPacketSize == 0 ||
 		playbackPeriodMicroframes !=
 			akai_eie_driver::kPlaybackTransferDurationMicroframes)
 	{
-		os_log(OS_LOG_DEFAULT,
-			   "AkaiEieDriver::OpenPlaybackInterface unsupported output timing");
 		return kIOReturnUnsupported;
 	}
 
@@ -1001,13 +801,7 @@ kern_return_t AkaiEieDriver::SendPlaybackSetup()
 			&bytesTransferred,
 			1000);
 		if (ret != kIOReturnSuccess)
-		{
-			os_log(OS_LOG_DEFAULT,
-				   "AkaiEieDriver::SendPlaybackSetup transfer %{public}lu failed 0x%{public}x",
-				   static_cast<unsigned long>(index),
-				   ret);
 			return ret;
-		}
 	}
 
 	return kIOReturnSuccess;
@@ -1095,108 +889,27 @@ kern_return_t AkaiEieDriver::StartPlayback()
 	__atomic_store_n(&ivars->playbackWriteFrame, 0, __ATOMIC_RELAXED);
 	__atomic_store_n(&ivars->captureReadFrame, 0, __ATOMIC_RELAXED);
 	__atomic_store_n(&ivars->captureWriteFrame, 0, __ATOMIC_RELAXED);
-	__atomic_store_n(&ivars->playbackEnqueuedFrames, 0, __ATOMIC_RELAXED);
-	__atomic_store_n(&ivars->playbackSubmittedFrames, 0, __ATOMIC_RELAXED);
-	__atomic_store_n(&ivars->playbackUnderrunFrames, 0, __ATOMIC_RELAXED);
-	__atomic_store_n(&ivars->playbackDroppedFrames, 0, __ATOMIC_RELAXED);
-	__atomic_store_n(&ivars->playbackPacketErrorCount, 0, __ATOMIC_RELAXED);
-	__atomic_store_n(&ivars->playbackScheduleRecoveryCount, 0, __ATOMIC_RELAXED);
-	__atomic_store_n(&ivars->playbackNoFeedbackCount, 0, __ATOMIC_RELAXED);
-	__atomic_store_n(&ivars->playbackFeedbackMismatchCount, 0, __ATOMIC_RELAXED);
-	__atomic_store_n(&ivars->playbackSubmittedTransferCount, 0, __ATOMIC_RELAXED);
-	__atomic_store_n(&ivars->playbackNonzeroTransfers, 0, __ATOMIC_RELAXED);
-	__atomic_store_n(&ivars->playbackNonzeroBytes, 0, __ATOMIC_RELAXED);
-	__atomic_store_n(&ivars->captureSubmittedTransferCount, 0, __ATOMIC_RELAXED);
-	__atomic_store_n(&ivars->captureCompletedTransferCount, 0, __ATOMIC_RELAXED);
-	__atomic_store_n(&ivars->captureDecodedFrames, 0, __ATOMIC_RELAXED);
-	__atomic_store_n(&ivars->captureReadFrames, 0, __ATOMIC_RELAXED);
-	__atomic_store_n(&ivars->captureOverrunFrames, 0, __ATOMIC_RELAXED);
-	__atomic_store_n(&ivars->captureUnderrunFrames, 0, __ATOMIC_RELAXED);
-	__atomic_store_n(&ivars->captureErrorCount, 0, __ATOMIC_RELAXED);
-	__atomic_store_n(&ivars->syncPacketErrorCount, 0, __ATOMIC_RELAXED);
-	__atomic_store_n(&ivars->syncMissingReportCount, 0, __ATOMIC_RELAXED);
-	__atomic_store_n(&ivars->syncValidReportCount, 0, __ATOMIC_RELAXED);
 	__atomic_store_n(&ivars->syncFeedbackFrames, 0, __ATOMIC_RELAXED);
 	__atomic_store_n(&ivars->syncClockBaseFrames, 0, __ATOMIC_RELAXED);
 	__atomic_store_n(&ivars->syncLastHostTime, 0, __ATOMIC_RELAXED);
 	__atomic_store_n(&ivars->syncFramesElapsed, 0, __ATOMIC_RELAXED);
 	__atomic_store_n(&ivars->playbackHasReceivedFrames, false, __ATOMIC_RELAXED);
-	__atomic_store_n(&ivars->captureHasReceivedFrames, false, __ATOMIC_RELAXED);
 	__atomic_store_n(&ivars->playbackTransfersStarted, false, __ATOMIC_RELAXED);
 	__atomic_store_n(&ivars->captureRunning, false, __ATOMIC_RELAXED);
 	ivars->playbackTimingState = {};
 	ivars->playbackTimestampFrames = 0;
 
-	bool captureTransfersReady = false;
 	kern_return_t ret = OpenPlaybackInterface();
-	if (ret != kIOReturnSuccess)
-	{
-		os_log(OS_LOG_DEFAULT,
-			   "AkaiEieDriver::StartPlayback interface setup failed 0x%{public}x",
-			   ret);
-	}
 	if (ret == kIOReturnSuccess)
-	{
 		ret = OpenSyncEndpoint();
-		if (ret != kIOReturnSuccess)
-		{
-			os_log(OS_LOG_DEFAULT,
-				   "AkaiEieDriver::StartPlayback required data endpoints unavailable 0x%{public}x",
-				   ret);
-		}
-	}
 	if (ret == kIOReturnSuccess)
-	{
 		ret = SendPlaybackSetup();
-		if (ret != kIOReturnSuccess)
-		{
-			os_log(OS_LOG_DEFAULT,
-				   "AkaiEieDriver::StartPlayback device setup failed 0x%{public}x",
-				   ret);
-		}
-	}
 	if (ret == kIOReturnSuccess)
-	{
 		ret = CreatePlaybackTransfers();
-		if (ret != kIOReturnSuccess)
-		{
-			os_log(OS_LOG_DEFAULT,
-				   "AkaiEieDriver::StartPlayback buffer setup failed 0x%{public}x",
-				   ret);
-		}
-	}
 	if (ret == kIOReturnSuccess)
-	{
 		ret = CreateSyncTransfers();
-		if (ret != kIOReturnSuccess)
-		{
-			os_log(OS_LOG_DEFAULT,
-				   "AkaiEieDriver::StartPlayback required sync buffer setup failed 0x%{public}x",
-				   ret);
-		}
-	}
 	if (ret == kIOReturnSuccess)
-	{
-		if (ivars->capturePipe && ivars->captureMaxPacketSize != 0)
-		{
-			const kern_return_t captureRet = CreateCaptureTransfers();
-			if (captureRet == kIOReturnSuccess)
-			{
-				captureTransfersReady = true;
-			}
-			else
-			{
-				os_log(OS_LOG_DEFAULT,
-					   "AkaiEieDriver::StartPlayback capture buffer setup failed 0x%{public}x; input will stay silent",
-					   captureRet);
-				ReleaseCaptureResources();
-			}
-		}
-		else
-		{
-			ReleaseCaptureResources();
-		}
-	}
+		ret = CreateCaptureTransfers();
 
 	if (ret != kIOReturnSuccess)
 	{
@@ -1209,103 +922,42 @@ kern_return_t AkaiEieDriver::StartPlayback()
 	ivars->syncInFlight = 0;
 	ivars->captureInFlight = 0;
 	__atomic_store_n(&ivars->playbackRunning, true, __ATOMIC_RELEASE);
-	__atomic_store_n(
-		&ivars->captureRunning,
-		captureTransfersReady,
-		__ATOMIC_RELEASE);
+	__atomic_store_n(&ivars->captureRunning, true, __ATOMIC_RELEASE);
 
 	ret = StartPlaybackTransfers();
 	if (ret != kIOReturnSuccess)
 	{
-		os_log(OS_LOG_DEFAULT,
-			   "AkaiEieDriver::StartPlayback initial submit failed 0x%{public}x",
-			   ret);
 		StopPlayback();
 		return ret;
 	}
-	if (captureTransfersReady)
+	ret = StartCaptureTransfers();
+	if (ret != kIOReturnSuccess)
 	{
-		const kern_return_t captureRet = StartCaptureTransfers();
-		if (captureRet != kIOReturnSuccess)
-		{
-			os_log(OS_LOG_DEFAULT,
-				   "AkaiEieDriver::StartPlayback capture submit failed 0x%{public}x; input will stay silent",
-				   captureRet);
-			__atomic_store_n(&ivars->captureRunning, false, __ATOMIC_RELEASE);
-			if (ivars->capturePipe)
-			{
-				const kern_return_t abortResult = ivars->capturePipe->Abort(
-					kIOUSBAbortSynchronous,
-					kIOReturnAborted,
-					nullptr);
-				if (abortResult != kIOReturnSuccess)
-				{
-					os_log(OS_LOG_DEFAULT,
-						   "AkaiEieDriver::StartPlayback capture abort after submit failure failed 0x%{public}x",
-						   abortResult);
-				}
-			}
-			if (ivars->captureInFlight == 0)
-				ReleaseCaptureResources();
-		}
+		StopPlayback();
+		return ret;
 	}
 
-	os_log(OS_LOG_DEFAULT,
-		   "AkaiEieDriver::StartPlayback ready 48 kHz playback=0x%{public}02x capture=0x%{public}02x",
-		   akai_eie_driver::kPlaybackEndpointAddress,
-		   ivars->captureEndpointAddress);
 	return kIOReturnSuccess;
 }
 
-void AkaiEieDriver::EnqueuePlaybackFrames(const float *frames,
-										  uint32_t frameCount)
+kern_return_t AkaiEieDriver::EnqueuePlaybackFrames(const float *frames,
+												   uint32_t frameCount)
 {
 	if (frames == nullptr || frameCount == 0 ||
 		ivars->playbackRingAddress == nullptr ||
 		!__atomic_load_n(&ivars->playbackRunning, __ATOMIC_ACQUIRE))
-		return;
+		return kIOReturnNotReady;
 
 	if (frameCount > akai_eie_driver::kPlaybackRingFrameCount)
-	{
-		__atomic_add_fetch(
-			&ivars->playbackDroppedFrames,
-			frameCount - akai_eie_driver::kPlaybackRingFrameCount,
-			__ATOMIC_RELAXED);
-		frames += static_cast<size_t>(
-					  frameCount - akai_eie_driver::kPlaybackRingFrameCount) *
-				  akai_eie_driver::kChannelCount;
-		frameCount = akai_eie_driver::kPlaybackRingFrameCount;
-	}
+		return kIOReturnOverrun;
 
 	const uint64_t writeFrame =
 		__atomic_load_n(&ivars->playbackWriteFrame, __ATOMIC_RELAXED);
-	const uint64_t minimumReadFrame =
-		writeFrame + frameCount > akai_eie_driver::kPlaybackRingFrameCount
-			? writeFrame + frameCount -
-				  akai_eie_driver::kPlaybackRingFrameCount
-			: 0;
-	uint64_t readFrame =
+	const uint64_t readFrame =
 		__atomic_load_n(&ivars->playbackReadFrame, __ATOMIC_ACQUIRE);
-	uint64_t overwrittenFrames = 0;
-	while (readFrame < minimumReadFrame &&
-		   !__atomic_compare_exchange_n(
-			   &ivars->playbackReadFrame,
-			   &readFrame,
-			   minimumReadFrame,
-			   false,
-			   __ATOMIC_RELEASE,
-			   __ATOMIC_ACQUIRE))
-	{
-	}
-	if (readFrame < minimumReadFrame)
-		overwrittenFrames = minimumReadFrame - readFrame;
-	if (overwrittenFrames > 0)
-	{
-		__atomic_add_fetch(
-			&ivars->playbackDroppedFrames,
-			overwrittenFrames,
-			__ATOMIC_RELAXED);
-	}
+	if (writeFrame + frameCount - readFrame >
+		akai_eie_driver::kPlaybackRingFrameCount)
+		return kIOReturnOverrun;
 
 	const uint32_t firstRingFrame = static_cast<uint32_t>(
 		writeFrame % akai_eie_driver::kPlaybackRingFrameCount);
@@ -1337,40 +989,33 @@ void AkaiEieDriver::EnqueuePlaybackFrames(const float *frames,
 		&ivars->playbackWriteFrame,
 		writeFrame + frameCount,
 		__ATOMIC_RELEASE);
-	__atomic_add_fetch(
-		&ivars->playbackEnqueuedFrames,
-		frameCount,
-		__ATOMIC_RELAXED);
 	__atomic_store_n(
 		&ivars->playbackHasReceivedFrames,
 		true,
 		__ATOMIC_RELEASE);
+	return kIOReturnSuccess;
 }
 
-void AkaiEieDriver::StoreCaptureBytes(const uint8_t *bytes, uint32_t byteCount)
+kern_return_t AkaiEieDriver::StoreCaptureBytes(const uint8_t *bytes,
+											   uint32_t byteCount)
 {
 	if (bytes == nullptr ||
-		ivars->captureRingAddress == nullptr ||
-		byteCount < akai_eie_driver::kCaptureBytesPerUsbFrame)
+		ivars->captureRingAddress == nullptr)
 	{
-		return;
+		return kIOReturnNotReady;
 	}
 
 	byteCount -= byteCount % akai_eie_driver::kCaptureBytesPerUsbFrame;
 	uint32_t frameCount =
 		byteCount / akai_eie_driver::kCaptureBytesPerUsbFrame;
 	if (frameCount == 0)
-		return;
+		return kIOReturnSuccess;
 
 	if (frameCount > akai_eie_driver::kCaptureRingFrameCount)
 	{
-		const uint32_t droppedFrameCount =
+		const uint32_t skippedFrames =
 			frameCount - akai_eie_driver::kCaptureRingFrameCount;
-		__atomic_add_fetch(
-			&ivars->captureOverrunFrames,
-			droppedFrameCount,
-			__ATOMIC_RELAXED);
-		bytes += static_cast<size_t>(droppedFrameCount) *
+		bytes += static_cast<size_t>(skippedFrames) *
 				 akai_eie_driver::kCaptureBytesPerUsbFrame;
 		frameCount = akai_eie_driver::kCaptureRingFrameCount;
 	}
@@ -1384,7 +1029,6 @@ void AkaiEieDriver::StoreCaptureBytes(const uint8_t *bytes, uint32_t byteCount)
 			: 0;
 	uint64_t readFrame =
 		__atomic_load_n(&ivars->captureReadFrame, __ATOMIC_ACQUIRE);
-	uint64_t overwrittenFrames = 0;
 	while (readFrame < minimumReadFrame &&
 		   !__atomic_compare_exchange_n(
 			   &ivars->captureReadFrame,
@@ -1394,15 +1038,6 @@ void AkaiEieDriver::StoreCaptureBytes(const uint8_t *bytes, uint32_t byteCount)
 			   __ATOMIC_RELEASE,
 			   __ATOMIC_ACQUIRE))
 	{
-	}
-	if (readFrame < minimumReadFrame)
-		overwrittenFrames = minimumReadFrame - readFrame;
-	if (overwrittenFrames > 0)
-	{
-		__atomic_add_fetch(
-			&ivars->captureOverrunFrames,
-			overwrittenFrames,
-			__ATOMIC_RELAXED);
 	}
 
 	uint32_t decodedFrames = 0;
@@ -1427,44 +1062,28 @@ void AkaiEieDriver::StoreCaptureBytes(const uint8_t *bytes, uint32_t byteCount)
 				firstRingFrame * akai_eie_driver::kBytesPerFrame),
 			contiguousFrameCount);
 		if (writtenFrames == 0)
-		{
-			__atomic_add_fetch(
-				&ivars->captureErrorCount, 1, __ATOMIC_RELAXED);
-			break;
-		}
+			return kIOReturnError;
 		decodedFrames += static_cast<uint32_t>(writtenFrames);
 	}
 
 	if (decodedFrames == 0)
-		return;
+		return kIOReturnUnderrun;
 
 	__atomic_store_n(
 		&ivars->captureWriteFrame,
 		writeFrame + decodedFrames,
 		__ATOMIC_RELEASE);
-	__atomic_add_fetch(
-		&ivars->captureDecodedFrames,
-		decodedFrames,
-		__ATOMIC_RELAXED);
-	__atomic_store_n(
-		&ivars->captureHasReceivedFrames,
-		true,
-		__ATOMIC_RELEASE);
+	return kIOReturnSuccess;
 }
 
-void AkaiEieDriver::CopyCaptureFrames(float *frames, uint32_t frameCount)
+kern_return_t AkaiEieDriver::CopyCaptureFrames(float *frames, uint32_t frameCount)
 {
 	if (frames == nullptr || frameCount == 0)
-		return;
+		return kIOReturnBadArgument;
 
-	const size_t frameBytes =
-		static_cast<size_t>(frameCount) * akai_eie_driver::kBytesPerFrame;
 	if (ivars->captureRingAddress == nullptr ||
 		!__atomic_load_n(&ivars->captureRunning, __ATOMIC_ACQUIRE))
-	{
-		memset(frames, 0, frameBytes);
-		return;
-	}
+		return kIOReturnNotReady;
 
 	const uint64_t readFrame =
 		__atomic_load_n(&ivars->captureReadFrame, __ATOMIC_RELAXED);
@@ -1506,25 +1125,13 @@ void AkaiEieDriver::CopyCaptureFrames(float *frames, uint32_t frameCount)
 			0,
 			static_cast<size_t>(frameCount - copiedFrames) *
 				akai_eie_driver::kBytesPerFrame);
-		if (__atomic_load_n(
-				&ivars->captureHasReceivedFrames,
-				__ATOMIC_ACQUIRE))
-		{
-			__atomic_add_fetch(
-				&ivars->captureUnderrunFrames,
-				frameCount - copiedFrames,
-				__ATOMIC_RELAXED);
-		}
 	}
 
 	__atomic_store_n(
 		&ivars->captureReadFrame,
 		readFrame + copiedFrames,
 		__ATOMIC_RELEASE);
-	__atomic_add_fetch(
-		&ivars->captureReadFrames,
-		copiedFrames,
-		__ATOMIC_RELAXED);
+	return kIOReturnSuccess;
 }
 
 kern_return_t AkaiEieDriver::StartPlaybackTransfers()
@@ -1566,23 +1173,11 @@ kern_return_t AkaiEieDriver::StartPlaybackTransfers()
 
 	ret = ValidateSyncClock();
 	if (ret != kIOReturnSuccess)
-	{
-		os_log(OS_LOG_DEFAULT,
-			   "AkaiEieDriver::StartPlayback required sync validation failed 0x%{public}x",
-			   ret);
 		return ret;
-	}
 	ret = StartSyncTransfers();
 	if (ret != kIOReturnSuccess)
-	{
-		os_log(OS_LOG_DEFAULT,
-			   "AkaiEieDriver::StartPlayback required sync submit failed 0x%{public}x",
-			   ret);
 		return ret;
-	}
 
-	os_log(OS_LOG_DEFAULT,
-		   "AkaiEieDriver::StartPlayback started validated USB clock and initial silent output lead");
 	return kIOReturnSuccess;
 }
 
@@ -1595,22 +1190,6 @@ kern_return_t AkaiEieDriver::SubmitPlaybackTransfer(uint32_t index)
 
 	const uint32_t feedbackFrames =
 		__atomic_exchange_n(&ivars->syncFramesElapsed, 0, __ATOMIC_ACQ_REL);
-	if (__atomic_load_n(&ivars->syncClockBaseFrames, __ATOMIC_ACQUIRE) != 0)
-	{
-		if (feedbackFrames == 0)
-		{
-			__atomic_add_fetch(
-				&ivars->playbackNoFeedbackCount, 1, __ATOMIC_RELAXED);
-		}
-		else if (feedbackFrames + 1 <
-					 akai_eie_driver::kPlaybackFramesPerTransfer ||
-				 feedbackFrames >
-					 akai_eie_driver::kPlaybackFramesPerTransfer + 1)
-		{
-			__atomic_add_fetch(
-				&ivars->playbackFeedbackMismatchCount, 1, __ATOMIC_RELAXED);
-		}
-	}
 	const uint32_t framesWanted = akai_eie::CalculatePlaybackFramesWanted(
 		akai_eie_driver::kDefaultSampleRateHz,
 		ivars->playbackTimingState,
@@ -1683,21 +1262,7 @@ kern_return_t AkaiEieDriver::SubmitPlaybackTransfer(uint32_t index)
 				   framesWanted -
 				   framesToCopy) *
 				   akai_eie_driver::kPlaybackBytesPerUsbFrame);
-		if (__atomic_load_n(
-				&ivars->playbackHasReceivedFrames,
-				__ATOMIC_ACQUIRE))
-		{
-			__atomic_add_fetch(
-				&ivars->playbackUnderrunFrames,
-				framesWanted -
-					framesToCopy,
-				__ATOMIC_RELAXED);
-		}
 	}
-	__atomic_add_fetch(
-		&ivars->playbackSubmittedFrames,
-		framesToCopy,
-		__ATOMIC_RELAXED);
 	__atomic_store_n(
 		&ivars->playbackReadFrame,
 		readFrame + framesToCopy,
@@ -1716,16 +1281,6 @@ kern_return_t AkaiEieDriver::SubmitPlaybackTransfer(uint32_t index)
 		frame.timeStamp = 0;
 	}
 
-	uint64_t nonzeroBytes = 0;
-	const size_t submittedBytes =
-		static_cast<size_t>(framesWanted) *
-		akai_eie_driver::kPlaybackBytesPerUsbFrame;
-	for (size_t byteIndex = 0; byteIndex < submittedBytes; ++byteIndex)
-	{
-		if (transfer.dataAddress[byteIndex] != 0)
-			++nonzeroBytes;
-	}
-
 	uint64_t currentFrame = 0;
 	uint64_t currentTime = 0;
 	kern_return_t ret = ivars->playbackInterface->GetFrameNumber(
@@ -1735,8 +1290,6 @@ kern_return_t AkaiEieDriver::SubmitPlaybackTransfer(uint32_t index)
 	if (ivars->nextUsbFrame <
 		currentFrame + akai_eie_driver::kPlaybackScheduleLeadBusFrames)
 	{
-		__atomic_add_fetch(
-			&ivars->playbackScheduleRecoveryCount, 1, __ATOMIC_RELAXED);
 		ivars->nextUsbFrame =
 			currentFrame + akai_eie_driver::kPlaybackScheduleLeadBusFrames;
 	}
@@ -1755,18 +1308,6 @@ kern_return_t AkaiEieDriver::SubmitPlaybackTransfer(uint32_t index)
 	{
 		transfer.submitted = false;
 		--ivars->playbackInFlight;
-	}
-	else
-	{
-		__atomic_add_fetch(
-			&ivars->playbackSubmittedTransferCount, 1, __ATOMIC_RELAXED);
-		if (nonzeroBytes != 0)
-		{
-			__atomic_add_fetch(
-				&ivars->playbackNonzeroTransfers, 1, __ATOMIC_RELAXED);
-			__atomic_add_fetch(
-				&ivars->playbackNonzeroBytes, nonzeroBytes, __ATOMIC_RELAXED);
-		}
 	}
 	return ret;
 }
@@ -1793,9 +1334,8 @@ void AkaiEieDriver::PlaybackComplete_Impl(OSAction *action, IOReturn status)
 	}
 	if (status != kIOReturnSuccess)
 	{
-		os_log(OS_LOG_DEFAULT,
-			   "AkaiEieDriver::PlaybackComplete transfer failed 0x%{public}x",
-			   status);
+		FailPlaybackStream(status);
+		return;
 	}
 	for (uint32_t packetIndex = 0;
 		 packetIndex < akai_eie_driver::kPlaybackIsoPacketCount;
@@ -1805,21 +1345,14 @@ void AkaiEieDriver::PlaybackComplete_Impl(OSAction *action, IOReturn status)
 			transfer.frameListAddress[packetIndex];
 		if (frame.status != kIOReturnSuccess)
 		{
-			__atomic_add_fetch(
-				&ivars->playbackPacketErrorCount,
-				1,
-				__ATOMIC_RELAXED);
+			FailPlaybackStream(frame.status);
+			return;
 		}
 	}
 
 	const kern_return_t ret = SubmitPlaybackTransfer(index);
 	if (ret != kIOReturnSuccess)
-	{
-		os_log(OS_LOG_DEFAULT,
-			   "AkaiEieDriver::PlaybackComplete resubmit failed 0x%{public}x",
-			   ret);
 		FailPlaybackStream(ret);
-	}
 }
 
 void AkaiEieDriver::SyncComplete_Impl(OSAction *action, IOReturn status)
@@ -1845,71 +1378,48 @@ void AkaiEieDriver::SyncComplete_Impl(OSAction *action, IOReturn status)
 
 	if (status != kIOReturnSuccess)
 	{
-		__atomic_add_fetch(
-			&ivars->syncPacketErrorCount, 1, __ATOMIC_RELAXED);
-		os_log(OS_LOG_DEFAULT,
-			   "AkaiEieDriver::SyncComplete transfer failed 0x%{public}x",
-			   status);
+		FailPlaybackStream(status);
+		return;
 	}
-	else
-	{
-		const IOUSBIsochronousFrame &frame = transfer.frameListAddress[0];
-		if (frame.status != kIOReturnSuccess)
-		{
-			__atomic_add_fetch(
-				&ivars->syncPacketErrorCount, 1, __ATOMIC_RELAXED);
-		}
-		else
-		{
-			const uint8_t feedback = transfer.dataAddress[0];
-			if (frame.completeCount == 0 ||
-				!akai_eie::IsReasonableSyncFeedback(feedback))
-			{
-				__atomic_add_fetch(
-					&ivars->syncMissingReportCount, 1, __ATOMIC_RELAXED);
-			}
-			else
-			{
-				const uint64_t totalFeedbackFrames = __atomic_add_fetch(
-					&ivars->syncFeedbackFrames, feedback, __ATOMIC_ACQ_REL);
-				__atomic_add_fetch(
-					&ivars->syncFramesElapsed, feedback, __ATOMIC_ACQ_REL);
-				__atomic_store_n(
-					&ivars->syncLastHostTime,
-					frame.timeStamp,
-					__ATOMIC_RELEASE);
-				__atomic_add_fetch(
-					&ivars->syncValidReportCount, 1, __ATOMIC_RELAXED);
 
-				const uint64_t clockBaseFrames = __atomic_load_n(
-					&ivars->syncClockBaseFrames, __ATOMIC_ACQUIRE);
-				const uint64_t clockFrames =
-					totalFeedbackFrames >= clockBaseFrames
-						? totalFeedbackFrames - clockBaseFrames
-						: 0;
-				const uint32_t timestampPeriod =
-					akai_eie_driver::ZeroTimestampPeriod(
-						akai_eie_driver::kDefaultSampleRateHz);
-				const uint64_t nextTimestampFrame =
-					ivars->playbackTimestampFrames + timestampPeriod;
-				if (clockFrames >= nextTimestampFrame && ivars->audioDevice)
-				{
-					ivars->playbackTimestampFrames = nextTimestampFrame;
-					ivars->audioDevice->UpdatePlaybackTimestamp(
-						nextTimestampFrame, frame.timeStamp);
-				}
+	const IOUSBIsochronousFrame &frame = transfer.frameListAddress[0];
+	if (frame.status == kIOReturnSuccess && frame.completeCount != 0)
+	{
+		const uint8_t feedback = transfer.dataAddress[0];
+		if (akai_eie::IsReasonableSyncFeedback(feedback))
+		{
+			const uint64_t totalFeedbackFrames = __atomic_add_fetch(
+				&ivars->syncFeedbackFrames, feedback, __ATOMIC_ACQ_REL);
+			__atomic_add_fetch(
+				&ivars->syncFramesElapsed, feedback, __ATOMIC_ACQ_REL);
+			__atomic_store_n(
+				&ivars->syncLastHostTime,
+				frame.timeStamp,
+				__ATOMIC_RELEASE);
+
+			const uint64_t clockBaseFrames = __atomic_load_n(
+				&ivars->syncClockBaseFrames, __ATOMIC_ACQUIRE);
+			const uint64_t clockFrames =
+				totalFeedbackFrames >= clockBaseFrames
+					? totalFeedbackFrames - clockBaseFrames
+					: 0;
+			const uint32_t timestampPeriod =
+				akai_eie_driver::ZeroTimestampPeriod(
+					akai_eie_driver::kDefaultSampleRateHz);
+			const uint64_t nextTimestampFrame =
+				ivars->playbackTimestampFrames + timestampPeriod;
+			if (clockFrames >= nextTimestampFrame && ivars->audioDevice)
+			{
+				ivars->playbackTimestampFrames = nextTimestampFrame;
+				ivars->audioDevice->UpdatePlaybackTimestamp(
+					nextTimestampFrame, frame.timeStamp);
 			}
 		}
 	}
 
 	const kern_return_t ret = SubmitSyncTransfer(index);
 	if (ret != kIOReturnSuccess)
-	{
-		os_log(OS_LOG_DEFAULT,
-			   "AkaiEieDriver::SyncComplete required feedback resubmit failed 0x%{public}x",
-			   ret);
 		FailPlaybackStream(ret);
-	}
 }
 
 void AkaiEieDriver::CaptureComplete_Impl(OSAction *action,
@@ -1941,47 +1451,33 @@ void AkaiEieDriver::CaptureComplete_Impl(OSAction *action,
 
 	if (status != kIOReturnSuccess)
 	{
-		__atomic_add_fetch(
-			&ivars->captureErrorCount, 1, __ATOMIC_RELAXED);
-		os_log(OS_LOG_DEFAULT,
-			   "AkaiEieDriver::CaptureComplete transfer failed 0x%{public}x",
-			   status);
+		FailPlaybackStream(status);
+		return;
 	}
-	else
+
+	if (actualByteCount > akai_eie_driver::kCaptureTransferBytes)
 	{
-		if (actualByteCount > akai_eie_driver::kCaptureTransferBytes)
-		{
-			actualByteCount = akai_eie_driver::kCaptureTransferBytes;
-			__atomic_add_fetch(
-				&ivars->captureErrorCount, 1, __ATOMIC_RELAXED);
-		}
-		if (actualByteCount %
-				akai_eie_driver::kCaptureBytesPerUsbFrame !=
-			0)
-		{
-			__atomic_add_fetch(
-				&ivars->captureErrorCount, 1, __ATOMIC_RELAXED);
-		}
+		FailPlaybackStream(kIOReturnOverrun);
+		return;
+	}
+	actualByteCount -= actualByteCount %
+					   akai_eie_driver::kCaptureBytesPerUsbFrame;
+	const kern_return_t storeResult =
 		StoreCaptureBytes(transfer.dataAddress, actualByteCount);
-		__atomic_add_fetch(
-			&ivars->captureCompletedTransferCount, 1, __ATOMIC_RELAXED);
+	if (storeResult != kIOReturnSuccess)
+	{
+		FailPlaybackStream(storeResult);
+		return;
 	}
 
 	const kern_return_t ret = SubmitCaptureTransfer(index);
 	if (ret != kIOReturnSuccess)
-	{
-		os_log(OS_LOG_DEFAULT,
-			   "AkaiEieDriver::CaptureComplete capture resubmit failed 0x%{public}x; input will stay silent",
-			   ret);
-		__atomic_store_n(&ivars->captureRunning, false, __ATOMIC_RELEASE);
-		if (ivars->capturePipe)
-			(void)ivars->capturePipe->Abort(
-				kIOUSBAbortAsynchronous, kIOReturnAborted, nullptr);
-	}
+		FailPlaybackStream(ret);
 }
 
 void AkaiEieDriver::FailPlaybackStream(IOReturn status)
 {
+	(void)status;
 	const bool wasRunning =
 		__atomic_exchange_n(&ivars->playbackRunning, false, __ATOMIC_ACQ_REL);
 	if (!wasRunning)
@@ -1990,32 +1486,6 @@ void AkaiEieDriver::FailPlaybackStream(IOReturn status)
 
 	if (ivars->audioDevice)
 		(void)ivars->audioDevice->SetClockIsStable(false);
-	os_log(OS_LOG_DEFAULT,
-		   "AkaiEieDriver::FailPlaybackStream stopping output because required USB stream failed "
-		   "0x%{public}x transfers=%{public}llu nonzeroTransfers=%{public}llu scheduleRecoveries=%{public}llu "
-		   "noFeedback=%{public}llu feedbackMismatch=%{public}llu syncErrors=%{public}llu "
-		   "syncMissing=%{public}llu syncReports=%{public}llu syncFrames=%{public}llu "
-		   "syncPending=%{public}u",
-		   status,
-		   static_cast<unsigned long long>(
-			   __atomic_load_n(&ivars->playbackSubmittedTransferCount, __ATOMIC_RELAXED)),
-		   static_cast<unsigned long long>(
-			   __atomic_load_n(&ivars->playbackNonzeroTransfers, __ATOMIC_RELAXED)),
-		   static_cast<unsigned long long>(
-			   __atomic_load_n(&ivars->playbackScheduleRecoveryCount, __ATOMIC_RELAXED)),
-		   static_cast<unsigned long long>(
-			   __atomic_load_n(&ivars->playbackNoFeedbackCount, __ATOMIC_RELAXED)),
-		   static_cast<unsigned long long>(
-			   __atomic_load_n(&ivars->playbackFeedbackMismatchCount, __ATOMIC_RELAXED)),
-		   static_cast<unsigned long long>(
-			   __atomic_load_n(&ivars->syncPacketErrorCount, __ATOMIC_RELAXED)),
-		   static_cast<unsigned long long>(
-			   __atomic_load_n(&ivars->syncMissingReportCount, __ATOMIC_RELAXED)),
-		   static_cast<unsigned long long>(
-			   __atomic_load_n(&ivars->syncValidReportCount, __ATOMIC_RELAXED)),
-		   static_cast<unsigned long long>(
-			   __atomic_load_n(&ivars->syncFeedbackFrames, __ATOMIC_RELAXED)),
-		   __atomic_load_n(&ivars->syncFramesElapsed, __ATOMIC_RELAXED));
 
 	bool expected = false;
 	if (!__atomic_compare_exchange_n(
@@ -2066,7 +1536,6 @@ void AkaiEieDriver::FinishPlaybackStop()
 	ReleasePlaybackResources();
 	ivars->dataInterface.reset();
 	__atomic_store_n(&ivars->playbackStopPending, false, __ATOMIC_RELEASE);
-	os_log(OS_LOG_DEFAULT, "AkaiEieDriver::StopPlayback drained");
 }
 
 void AkaiEieDriver::ReleaseCaptureResources()
@@ -2096,7 +1565,6 @@ void AkaiEieDriver::ReleaseCaptureResources()
 	ivars->captureInFlight = 0;
 	ivars->captureMaxPacketSize = 0;
 	ivars->captureEndpointAddress = 0;
-	ivars->captureHasReceivedFrames = false;
 	ivars->captureRunning = false;
 }
 
@@ -2194,132 +1662,42 @@ void AkaiEieDriver::StopPlayback()
 		return;
 	}
 
-	os_log(
-		OS_LOG_DEFAULT,
-		"AkaiEieDriver::StopPlayback enqueued=%{public}llu submitted=%{public}llu "
-		"underrun=%{public}llu dropped=%{public}llu transfers=%{public}llu nonzeroTransfers=%{public}llu "
-		"nonzeroBytes=%{public}llu packetErrors=%{public}llu "
-		"scheduleRecoveries=%{public}llu noFeedback=%{public}llu feedbackMismatch=%{public}llu "
-		"captureSubmitted=%{public}llu captureCompleted=%{public}llu captureDecoded=%{public}llu "
-		"captureRead=%{public}llu captureUnderrun=%{public}llu captureOverrun=%{public}llu "
-		"captureErrors=%{public}llu "
-		"syncErrors=%{public}llu syncMissing=%{public}llu syncReports=%{public}llu "
-		"syncFrames=%{public}llu syncPending=%{public}u",
-		static_cast<unsigned long long>(
-			__atomic_load_n(&ivars->playbackEnqueuedFrames, __ATOMIC_RELAXED)),
-		static_cast<unsigned long long>(
-			__atomic_load_n(&ivars->playbackSubmittedFrames, __ATOMIC_RELAXED)),
-		static_cast<unsigned long long>(
-			__atomic_load_n(&ivars->playbackUnderrunFrames, __ATOMIC_RELAXED)),
-		static_cast<unsigned long long>(
-			__atomic_load_n(&ivars->playbackDroppedFrames, __ATOMIC_RELAXED)),
-		static_cast<unsigned long long>(
-			__atomic_load_n(&ivars->playbackSubmittedTransferCount, __ATOMIC_RELAXED)),
-		static_cast<unsigned long long>(
-			__atomic_load_n(&ivars->playbackNonzeroTransfers, __ATOMIC_RELAXED)),
-		static_cast<unsigned long long>(
-			__atomic_load_n(&ivars->playbackNonzeroBytes, __ATOMIC_RELAXED)),
-		static_cast<unsigned long long>(
-			__atomic_load_n(&ivars->playbackPacketErrorCount, __ATOMIC_RELAXED)),
-		static_cast<unsigned long long>(
-			__atomic_load_n(&ivars->playbackScheduleRecoveryCount, __ATOMIC_RELAXED)),
-		static_cast<unsigned long long>(
-			__atomic_load_n(&ivars->playbackNoFeedbackCount, __ATOMIC_RELAXED)),
-		static_cast<unsigned long long>(
-			__atomic_load_n(&ivars->playbackFeedbackMismatchCount, __ATOMIC_RELAXED)),
-		static_cast<unsigned long long>(
-			__atomic_load_n(&ivars->captureSubmittedTransferCount, __ATOMIC_RELAXED)),
-		static_cast<unsigned long long>(
-			__atomic_load_n(&ivars->captureCompletedTransferCount, __ATOMIC_RELAXED)),
-		static_cast<unsigned long long>(
-			__atomic_load_n(&ivars->captureDecodedFrames, __ATOMIC_RELAXED)),
-		static_cast<unsigned long long>(
-			__atomic_load_n(&ivars->captureReadFrames, __ATOMIC_RELAXED)),
-		static_cast<unsigned long long>(
-			__atomic_load_n(&ivars->captureUnderrunFrames, __ATOMIC_RELAXED)),
-		static_cast<unsigned long long>(
-			__atomic_load_n(&ivars->captureOverrunFrames, __ATOMIC_RELAXED)),
-		static_cast<unsigned long long>(
-			__atomic_load_n(&ivars->captureErrorCount, __ATOMIC_RELAXED)),
-		static_cast<unsigned long long>(
-			__atomic_load_n(&ivars->syncPacketErrorCount, __ATOMIC_RELAXED)),
-		static_cast<unsigned long long>(
-			__atomic_load_n(&ivars->syncMissingReportCount, __ATOMIC_RELAXED)),
-		static_cast<unsigned long long>(
-			__atomic_load_n(&ivars->syncValidReportCount, __ATOMIC_RELAXED)),
-		static_cast<unsigned long long>(
-			__atomic_load_n(&ivars->syncFeedbackFrames, __ATOMIC_RELAXED)),
-		__atomic_load_n(&ivars->syncFramesElapsed, __ATOMIC_RELAXED));
-
 	if (ivars->syncPipe)
 	{
 		OSSharedPtr<IOUSBHostPipe> syncPipe = ivars->syncPipe;
-		const kern_return_t abortResult = syncPipe->Abort(
+		(void)syncPipe->Abort(
 			kIOUSBAbortSynchronous,
 			kIOReturnAborted,
 			nullptr);
-		if (abortResult != kIOReturnSuccess)
-		{
-			os_log(OS_LOG_DEFAULT,
-				   "AkaiEieDriver::StopPlayback sync abort failed 0x%{public}x",
-				   abortResult);
-		}
 	}
 	if (ivars->capturePipe)
 	{
 		OSSharedPtr<IOUSBHostPipe> capturePipe = ivars->capturePipe;
-		const kern_return_t abortResult = capturePipe->Abort(
+		(void)capturePipe->Abort(
 			kIOUSBAbortSynchronous,
 			kIOReturnAborted,
 			nullptr);
-		if (abortResult != kIOReturnSuccess)
-		{
-			os_log(OS_LOG_DEFAULT,
-				   "AkaiEieDriver::StopPlayback capture abort failed 0x%{public}x",
-				   abortResult);
-		}
 	}
 	if (ivars->playbackPipe)
 	{
 		OSSharedPtr<IOUSBHostPipe> playbackPipe = ivars->playbackPipe;
-		const kern_return_t abortResult = playbackPipe->Abort(
+		(void)playbackPipe->Abort(
 			kIOUSBAbortSynchronous,
 			kIOReturnAborted,
 			nullptr);
-		if (abortResult != kIOReturnSuccess)
-		{
-			os_log(OS_LOG_DEFAULT,
-				   "AkaiEieDriver::StopPlayback abort failed 0x%{public}x",
-				   abortResult);
-		}
 	}
 	FinishPlaybackStop();
 }
 
 kern_return_t IMPL(AkaiEieDriver, Stop)
 {
-	os_log(OS_LOG_DEFAULT, "AkaiEieDriver::Stop");
-
 	StopPlayback();
 	if (ivars->audioDevice)
-	{
-		os_log(OS_LOG_DEFAULT, "AkaiEieDriver::Stop removing audio device");
-		const kern_return_t removeResult =
-			RemoveObject(ivars->audioDevice.get());
-		if (removeResult != kIOReturnSuccess)
-		{
-			os_log(OS_LOG_DEFAULT,
-				   "AkaiEieDriver::Stop RemoveObject failed 0x%{public}x",
-				   removeResult);
-		}
-	}
-	os_log(OS_LOG_DEFAULT, "AkaiEieDriver::Stop closing USB provider");
+		(void)RemoveObject(ivars->audioDevice.get());
 	CloseUsbProvider();
-	os_log(OS_LOG_DEFAULT, "AkaiEieDriver::Stop releasing objects");
 	ivars->audioDevice.reset();
 	ivars->workQueue.reset();
 
-	os_log(OS_LOG_DEFAULT, "AkaiEieDriver::Stop calling super");
 	return Stop(provider, SUPERDISPATCH);
 }
 
@@ -2330,13 +1708,7 @@ void AkaiEieDriver::CloseUsbProvider()
 
 	if (ivars->usbDevice && ivars->usbDeviceOpen)
 	{
-		const kern_return_t ret = ivars->usbDevice->Close(this, 0);
-		if (ret != kIOReturnSuccess)
-		{
-			os_log(OS_LOG_DEFAULT,
-				   "AkaiEieDriver::CloseUsbProvider Close failed 0x%{public}x",
-				   ret);
-		}
+		(void)ivars->usbDevice->Close(this, 0);
 		ivars->usbDeviceOpen = false;
 	}
 	ivars->usbDevice.reset();

@@ -56,6 +56,73 @@ namespace
 		}
 	}
 
+	void UpdateMaxRelaxed(uint64_t *maxValue, uint64_t candidate)
+	{
+		uint64_t current = __atomic_load_n(maxValue, __ATOMIC_RELAXED);
+		while (candidate > current &&
+			   !__atomic_compare_exchange_n(
+				   maxValue,
+				   &current,
+				   candidate,
+				   false,
+				   __ATOMIC_RELAXED,
+				   __ATOMIC_RELAXED))
+		{
+		}
+	}
+
+	const char *ConfigChangeName(uint64_t changeAction)
+	{
+		switch (static_cast<IOUserAudioReservedConfigChangeAction>(changeAction))
+		{
+		case IOUserAudioReservedConfigChangeAction::SampleRate:
+			return "SampleRate";
+		case IOUserAudioReservedConfigChangeAction::RingBufferFrameSize:
+			return "RingBufferFrameSize";
+		case IOUserAudioReservedConfigChangeAction::StreamFormat:
+			return "StreamFormat";
+		default:
+			return "DriverSpecific";
+		}
+	}
+
+	void LogConfigChange(const char *phase,
+						 uint64_t changeAction,
+						 OSObject *changeInfo)
+	{
+		OSNumber *number = OSDynamicCast(OSNumber, changeInfo);
+		if (number != nullptr)
+		{
+			os_log(OS_LOG_DEFAULT,
+				   "AkaiEieDevice::%{public}s action=%{public}llu (%{public}s) number=%{public}llu",
+				   phase,
+				   static_cast<unsigned long long>(changeAction),
+				   ConfigChangeName(changeAction),
+				   static_cast<unsigned long long>(
+					   number->unsigned64BitValue()));
+			return;
+		}
+
+		OSData *data = OSDynamicCast(OSData, changeInfo);
+		if (data != nullptr)
+		{
+			os_log(OS_LOG_DEFAULT,
+				   "AkaiEieDevice::%{public}s action=%{public}llu (%{public}s) data=%{public}p",
+				   phase,
+				   static_cast<unsigned long long>(changeAction),
+				   ConfigChangeName(changeAction),
+				   data);
+			return;
+		}
+
+		os_log(OS_LOG_DEFAULT,
+			   "AkaiEieDevice::%{public}s action=%{public}llu (%{public}s) info=%{public}p",
+			   phase,
+			   static_cast<unsigned long long>(changeAction),
+			   ConfigChangeName(changeAction),
+			   changeInfo);
+	}
+
 } // namespace
 
 bool AkaiEieDevice::init(IOUserAudioDriver *driver,
@@ -155,7 +222,10 @@ bool AkaiEieDevice::init(IOUserAudioDriver *driver,
 			  &ivars->readOperationCount,
 			  1,
 			  __ATOMIC_RELAXED);
-		  ZeroInputFrames(sampleTime, ioBufferFrameSize);
+		  UpdateMaxRelaxed(
+			  &ivars->maxReadBufferFrameSize,
+			  ioBufferFrameSize);
+		  ReadInputFrames(sampleTime, ioBufferFrameSize);
 	  }
 	  else if (operation == IOUserAudioIOOperationWriteEnd)
 	  {
@@ -163,6 +233,9 @@ bool AkaiEieDevice::init(IOUserAudioDriver *driver,
 			  &ivars->writeOperationCount,
 			  1,
 			  __ATOMIC_RELAXED);
+		  UpdateMaxRelaxed(
+			  &ivars->maxWriteBufferFrameSize,
+			  ioBufferFrameSize);
 		  QueueOutputFrames(sampleTime, ioBufferFrameSize);
 	  }
 
@@ -305,9 +378,11 @@ kern_return_t AkaiEieDevice::StartIO(IOUserAudioStartStopFlags flags)
 		return ret;
 	}
 
-	ivars->ioStarted = true;
 	__atomic_store_n(&ivars->writeOperationCount, 0, __ATOMIC_RELAXED);
 	__atomic_store_n(&ivars->readOperationCount, 0, __ATOMIC_RELAXED);
+	__atomic_store_n(&ivars->maxWriteBufferFrameSize, 0, __ATOMIC_RELAXED);
+	__atomic_store_n(&ivars->maxReadBufferFrameSize, 0, __ATOMIC_RELAXED);
+	ivars->ioStarted = true;
 
 	if (ivars->transportDriver == nullptr)
 		ret = kIOReturnNotReady;
@@ -325,7 +400,10 @@ kern_return_t AkaiEieDevice::StartIO(IOUserAudioStartStopFlags flags)
 	(void)ivars->inputStream->SetStreamIsActive(true);
 	ZeroInputFrames(0, ivars->zeroTimestampPeriod);
 
-	os_log(OS_LOG_DEFAULT, "AkaiEieDevice::StartIO");
+	os_log(OS_LOG_DEFAULT,
+		   "AkaiEieDevice::StartIO zeroTimestampPeriod=%{public}u streamBufferFrames=%{public}u",
+		   ivars->zeroTimestampPeriod,
+		   akai_eie_driver::kIOBufferFrameCount);
 	return kIOReturnSuccess;
 }
 
@@ -367,6 +445,35 @@ void AkaiEieDevice::ZeroInputFrames(uint64_t sampleTime, uint32_t frameCount)
 		frameCount);
 }
 
+void AkaiEieDevice::ReadInputFrames(uint64_t sampleTime, uint32_t frameCount)
+{
+	if (ivars->transportDriver == nullptr ||
+		ivars->inputBufferAddress == nullptr ||
+		ivars->zeroTimestampPeriod == 0)
+	{
+		ZeroInputFrames(sampleTime, frameCount);
+		return;
+	}
+
+	// AudioDriverKit addresses stream windows modulo the hardware timeline period.
+	while (frameCount > 0)
+	{
+		const uint32_t firstFrame = static_cast<uint32_t>(
+			sampleTime % ivars->zeroTimestampPeriod);
+		const uint32_t contiguousFrameCount =
+			frameCount <= ivars->zeroTimestampPeriod - firstFrame
+				? frameCount
+				: ivars->zeroTimestampPeriod - firstFrame;
+		float *frames = reinterpret_cast<float *>(
+			ivars->inputBufferAddress +
+			firstFrame * akai_eie_driver::kBytesPerFrame);
+		ivars->transportDriver->CopyCaptureFrames(
+			frames, contiguousFrameCount);
+		sampleTime += contiguousFrameCount;
+		frameCount -= contiguousFrameCount;
+	}
+}
+
 void AkaiEieDevice::QueueOutputFrames(uint64_t sampleTime, uint32_t frameCount)
 {
 	if (ivars->transportDriver == nullptr ||
@@ -399,11 +506,17 @@ kern_return_t AkaiEieDevice::StopIO(IOUserAudioStartStopFlags flags)
 	{
 		os_log(
 			OS_LOG_DEFAULT,
-			"AkaiEieDevice::StopIO writes=%{public}llu reads=%{public}llu zeroTimestamp=%{public}llu",
+			"AkaiEieDevice::StopIO writes=%{public}llu reads=%{public}llu "
+			"maxWriteFrames=%{public}llu maxReadFrames=%{public}llu "
+			"zeroTimestamp=%{public}llu",
 			static_cast<unsigned long long>(
 				__atomic_load_n(&ivars->writeOperationCount, __ATOMIC_RELAXED)),
 			static_cast<unsigned long long>(
 				__atomic_load_n(&ivars->readOperationCount, __ATOMIC_RELAXED)),
+			static_cast<unsigned long long>(
+				__atomic_load_n(&ivars->maxWriteBufferFrameSize, __ATOMIC_RELAXED)),
+			static_cast<unsigned long long>(
+				__atomic_load_n(&ivars->maxReadBufferFrameSize, __ATOMIC_RELAXED)),
 			static_cast<unsigned long long>(ivars->zeroTimestampSampleTime));
 		ivars->ioStarted = false;
 		if (ivars->outputStream)
@@ -462,13 +575,26 @@ kern_return_t AkaiEieDevice::PerformDeviceConfigurationChange(
 	uint64_t changeAction,
 	OSObject *changeInfo)
 {
-	return super::PerformDeviceConfigurationChange(changeAction, changeInfo);
+	LogConfigChange(
+		"PerformDeviceConfigurationChange",
+		changeAction,
+		changeInfo);
+	const kern_return_t ret =
+		super::PerformDeviceConfigurationChange(changeAction, changeInfo);
+	os_log(OS_LOG_DEFAULT,
+		   "AkaiEieDevice::PerformDeviceConfigurationChange result=0x%{public}x",
+		   ret);
+	return ret;
 }
 
 kern_return_t AkaiEieDevice::AbortDeviceConfigurationChange(
 	uint64_t changeAction,
 	OSObject *changeInfo)
 {
+	LogConfigChange(
+		"AbortDeviceConfigurationChange",
+		changeAction,
+		changeInfo);
 	return super::AbortDeviceConfigurationChange(changeAction, changeInfo);
 }
 

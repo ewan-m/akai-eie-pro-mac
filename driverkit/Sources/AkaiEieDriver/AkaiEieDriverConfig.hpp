@@ -50,6 +50,12 @@ namespace akai_eie_driver
 	constexpr uint32_t kPlaybackRingFrameCount = kIOBufferFrameCount;
 	constexpr uint32_t kPlaybackRingBytes =
 		kPlaybackRingFrameCount * kPlaybackBytesPerUsbFrame;
+	constexpr uint32_t kCaptureTransferCount = 8;
+	constexpr uint32_t kCaptureTransferBytes = 4096;
+	constexpr uint32_t kCaptureBytesPerUsbFrame = 64;
+	constexpr uint32_t kCaptureRingFrameCount = kIOBufferFrameCount;
+	constexpr uint32_t kCaptureRingBytes =
+		kCaptureRingFrameCount * kBytesPerFrame;
 
 	// Interface 1 exposes a small isochronous IN packet containing device-clock
 	// frame advances once per millisecond. Keep individual reports available to

@@ -27,6 +27,8 @@ struct AkaiEieDevice_IVars
 	bool ioStarted;
 	uint64_t writeOperationCount;
 	uint64_t readOperationCount;
+	uint64_t maxWriteBufferFrameSize;
+	uint64_t maxReadBufferFrameSize;
 };
 
 class AkaiEieDevice : public IOUserAudioDevice
@@ -55,6 +57,7 @@ private:
 	kern_return_t MapStreamBuffers() LOCALONLY;
 	void UnmapStreamBuffers() LOCALONLY;
 	void ZeroInputFrames(uint64_t sampleTime, uint32_t frameCount) LOCALONLY;
+	void ReadInputFrames(uint64_t sampleTime, uint32_t frameCount) LOCALONLY;
 	void QueueOutputFrames(uint64_t sampleTime, uint32_t frameCount) LOCALONLY;
 };
 

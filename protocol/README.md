@@ -1,16 +1,9 @@
 # AKAI EIE Pro Protocol Layer
 
-This directory contains the AKAI-specific wire protocol extracted from the
-Linux driver. It intentionally has no dependency on ALSA, Linux USB, CoreAudio,
-DriverKit, Objective-C, heap allocation, exceptions, or STL containers.
-
-The goal is for the same code to back either:
-
-- a DriverKit/AudioDriverKit dext, where USB transport is implemented with
-  `IOUSBHostDevice`, `IOUSBHostInterface`, and `IOUSBHostPipe`; or
-- a CoreAudio HAL plugin fallback, where a separate transport layer owns USB
-  access and calls into this protocol layer for control sequences and audio
-  packing.
+This directory contains the AKAI-specific wire protocol used by the macOS
+DriverKit implementation. It intentionally has no dependency on CoreAudio,
+DriverKit, Objective-C, heap allocation, exceptions, or STL containers, so the
+driver-facing code can stay small and predictable.
 
 ## What Is Included
 
@@ -20,26 +13,25 @@ The goal is for the same code to back either:
 - Playback encoding from 4-channel interleaved Float32 into 12-byte AKAI wire
   frames.
 - Playback transfer filling for already-packed 12-byte AKAI wire frames.
-- Capture decoding from the device's 64-byte USB frames into 1, 2, or 4
-  channels of little-endian PCM.
+- Capture decoding from the device's 64-byte USB frames into little-endian PCM.
 - Capture decoding from the device's 64-byte USB frames into 4-channel
-  interleaved Float32 for CoreAudio/AudioDriverKit stream buffers.
+  interleaved Float32 for AudioDriverKit stream buffers.
 
-## Platform Adapter Responsibilities
+## DriverKit Adapter Responsibilities
 
-The platform-specific driver still owns:
+The macOS driver still owns:
 
 - matching and opening the USB device;
 - selecting alternate setting `1` on interfaces `0` and `1`;
 - translating `ControlTransfer` records into USB control requests;
 - opening endpoint pipes, including capture endpoint `0x86`;
 - scheduling isochronous playback/sync transfers and bulk capture transfers;
-- exposing streams, controls, timestamps, and configuration changes to
-  CoreAudio or ALSA.
+- exposing streams, controls, timestamps, and configuration changes through
+  AudioDriverKit.
 
 ## Entitlements To Start Now
 
-For the DriverKit distribution path, request these Apple entitlements early:
+For distribution, request these Apple entitlements early:
 
 - `com.apple.developer.driverkit`
 - `com.apple.developer.driverkit.family.audio`

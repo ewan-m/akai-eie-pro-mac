@@ -4,9 +4,9 @@ This is the target macOS architecture for the project: an AudioDriverKit driver
 extension that owns the EIE Pro as real USB hardware and uses USBDriverKit for
 the non-class-compliant transport.
 
-The current HAL plugin proved the AKAI protocol pieces, but it also has to
-recreate too much of CoreAudio's device engine in a plug-in process. The dext
-should instead let AudioDriverKit own the audio-device contract:
+Earlier user-space macOS experiments proved useful protocol details, but they
+had to recreate too much of CoreAudio's device engine in a plug-in process.
+The dext lets AudioDriverKit own the audio-device contract:
 
 ```text
 CoreAudio HAL
@@ -24,7 +24,7 @@ CoreAudio HAL
   - playback Float32 to AKAI 4-channel S24_3LE wire frames
   - capture 64-byte USB frame decoding
   - isochronous packet layout helpers
-- The HAL USB transport's hardware observations:
+- Hardware observations from the earlier macOS prototype:
   - select alternate setting `1` on interfaces `0` and `1`
   - send the reset control-transfer sequence after alt-setting selection
   - use an isochronous OUT playback endpoint
@@ -34,8 +34,8 @@ CoreAudio HAL
 
 ## Code That Should Not Port
 
-- `AudioServerPlugInDriverInterface` object/property plumbing.
-- HAL-side fake zero timestamp calculation.
+- Legacy CoreAudio user-space object/property plumbing.
+- User-space fake zero timestamp calculation.
 - IOKit userspace `IOUSBLib` and low-latency isoch APIs.
 - Ozzy's kext/user-client shared-memory boundary.
 

@@ -4,7 +4,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>EIE Pro macOS Driver — Stop it being a paperweight</title>
+  <title>AKAI EIE Pro Driver - Free and open source</title>
   <link
     href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;1,6..72,400&family=DM+Sans:wght@400;500;700&display=swap"
     rel="stylesheet">
@@ -42,14 +42,12 @@
       overflow-x: hidden
     }
 
-    /* LAYOUT */
     .container {
       max-width: 720px;
       margin: 0 auto;
       padding: 0 1.5rem
     }
 
-    /* NAV */
     nav {
       padding: 1.5rem 2.5rem;
       display: flex;
@@ -64,7 +62,7 @@
       color: var(--dim)
     }
 
-    .nav-buy {
+    .nav-link {
       font-family: var(--sans);
       font-size: 0.85rem;
       font-weight: 500;
@@ -76,11 +74,10 @@
       transition: opacity 0.2s;
     }
 
-    .nav-buy:hover {
+    .nav-link:hover {
       opacity: 0.8
     }
 
-    /* HERO */
     .hero {
       text-align: center;
       padding: 5rem 1.5rem 3rem;
@@ -91,7 +88,6 @@
       max-width: 80%;
       margin: 0 auto 2.5rem;
       display: block;
-      /* Replace this with your actual product image */
     }
 
     .hero h1 {
@@ -106,12 +102,12 @@
     .hero-sub {
       font-size: 1.1rem;
       color: var(--dim);
-      max-width: 480px;
+      max-width: 520px;
       margin: 0 auto 2.5rem;
       line-height: 1.6;
     }
 
-    .buy-btn {
+    .download-btn {
       display: inline-flex;
       align-items: center;
       gap: 0.5rem;
@@ -126,32 +122,24 @@
       transition: transform 0.15s, box-shadow 0.15s;
     }
 
-    .buy-btn:hover {
+    .download-btn:hover {
       transform: translateY(-1px);
       box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15)
     }
 
-    .buy-price {
-      font-weight: 400;
-      opacity: 0.6;
-      margin-left: 0.25rem
-    }
-
-    .buy-note {
+    .download-note {
       display: block;
       margin-top: 1rem;
       font-size: 0.8rem;
       color: var(--light);
     }
 
-    /* DIVIDER */
     hr {
       border: none;
       border-top: 1px solid var(--border);
       margin: 3rem 0
     }
 
-    /* PITCH */
     .pitch {
       padding: 0 1.5rem
     }
@@ -180,7 +168,6 @@
       margin-bottom: 0
     }
 
-    /* WORKS WITH */
     .works {
       max-width: 720px;
       margin: 3rem auto;
@@ -201,7 +188,6 @@
       line-height: 1.6
     }
 
-    /* HOW */
     .how {
       max-width: 720px;
       margin: 3rem auto 0;
@@ -246,7 +232,6 @@
       color: var(--dim);
     }
 
-    /* REQUIREMENTS */
     .reqs {
       max-width: 720px;
       margin: 2.5rem auto;
@@ -259,7 +244,6 @@
       line-height: 1.7
     }
 
-    /* BOTTOM CTA */
     .bottom-cta {
       text-align: center;
       padding: 3rem 1.5rem 5rem;
@@ -273,7 +257,6 @@
       margin-bottom: 1.5rem;
     }
 
-    /* FOOTER */
     footer {
       border-top: 1px solid var(--border);
       padding: 2rem 2.5rem;
@@ -299,7 +282,6 @@
       color: var(--text)
     }
 
-    /* RESPONSIVE */
     @media(max-width:600px) {
       .hero {
         padding-top: 3rem
@@ -323,23 +305,22 @@
 <body>
 
   <nav>
-    <span class="nav-left">interslice</span>
-    <a href="#buy" class="nav-buy">Buy — $20</a>
+    <span class="nav-left">akai-eie-pro</span>
+    <a href="https://github.com/ewan-m/akai-eie-pro" class="nav-link">GitHub</a>
   </nav>
 
   <section class="hero">
-    <!-- Replace src with your actual transparent-bg product image -->
     <img class="hero-img"
       src="https://media.sweetwater.com/m/products/image/051876529cHaKiBxzL97o9jA8huJjY8hMvZsSwZk.jpg"
       alt="Akai EIE Pro">
     <h1>Revive your EIE Pro from paperweight status</h1>
     <p class="hero-sub">
-      Akai stopped making drivers. Apple moved to ARM. Your perfectly good interface stopped working. This fixes that.
+      Free, open-source driver work for the AKAI EIE Pro on Apple Silicon Macs.
     </p>
-    <a href="#buy" class="buy-btn" id="buy">
-      Buy now<span class="buy-price">— $20</span>
+    <a href="https://github.com/ewan-m/akai-eie-pro" class="download-btn" id="download">
+      Get it free on GitHub
     </a>
-    <span class="buy-note">Instant download. macOS 13+ / Apple Silicon & Intel.</span>
+    <span class="download-note">No payment. Source code is public. Hardware-driver work in progress.</span>
   </section>
 
   <hr>
@@ -348,64 +329,66 @@
     <div class="pitch-block">
       <h2>What this is</h2>
       <p>
-        A native CoreAudio driver for the Akai EIE Pro on modern macOS. No kernel extensions, no Rosetta, no
-        workarounds. Install it, plug in the interface, it shows up in your DAW. That's it.
+        A public macOS driver project for the AKAI EIE Pro USB audio interface. The current path is a native
+        AudioDriverKit and USBDriverKit system extension for modern Apple Silicon Macs.
       </p>
       <p>
-        4 in, 4 out, 24-bit, 48kHz. Adjustable buffer size so you can dial in your latency in FL Studio, Ableton, Logic,
-        whatever you use. Built from the ground up using the same USB protocol knowledge as the working Linux driver.
+        The code is shared so other EIE Pro owners can test it, learn from it, and help finish the missing pieces. It is
+        not an official Akai release and it is not yet a polished end-user installer.
       </p>
     </div>
   </div>
 
   <div class="works">
-    <h3>Works with everything that uses CoreAudio</h3>
+    <h3>Current focus</h3>
     <p>
-      Logic Pro, Ableton Live, FL Studio, Reaper, Audacity, GarageBand, OBS, Zoom, Discord, Google Meet — if it has an
-      audio device dropdown on macOS, the EIE Pro will be in it.
+      macOS DriverKit playback at 48kHz is the active path. Capture, sample-rate switching, signing, entitlement
+      approval, and packaging are still being worked through.
     </p>
   </div>
 
   <hr>
 
   <div class="how">
-    <h2>Install</h2>
+    <h2>Start here</h2>
     <div class="step">
       <span class="step-num">1.</span>
-      <p>Download the .pkg and run it. It drops the driver into <span class="cmd">/Library/Audio/Plug-Ins/HAL</span></p>
+      <p>Clone the free GitHub repo.<br><span class="cmd">git clone
+          https://github.com/ewan-m/akai-eie-pro.git</span></p>
     </div>
     <div class="step">
       <span class="step-num">2.</span>
-      <p>Restart CoreAudio, or just reboot.<br><span class="cmd">sudo launchctl kickstart -kp
-          system/com.apple.audio.coreaudiod</span></p>
+      <p>Read the DriverKit notes for macOS status, activation, logging, and entitlement requirements.<br><span
+          class="cmd">driverkit/README.md</span></p>
     </div>
     <div class="step">
       <span class="step-num">3.</span>
-      <p>Plug in the EIE Pro. It appears as "AKAI EIE Pro" in Audio MIDI Setup and any app.</p>
+      <p>Build the local DriverKit app when you are ready to test on hardware.<br><span
+          class="cmd">make -C driverkit app</span></p>
     </div>
   </div>
 
   <div class="reqs">
     <p>
-      Requires macOS 13 Ventura or later. Works on M1, M2, M3, M4, and Intel Macs. The EIE Pro connects over USB 2.0 —
-      any port works, including via hubs and dongles.
+      Requires an Apple Silicon Mac, a modern macOS DriverKit development setup, and an AKAI EIE Pro USB device
+      identified as 09e8:0010.
     </p>
   </div>
 
   <hr>
 
   <section class="bottom-cta">
-    <h2>$20 is less than the cable you need to connect it</h2>
-    <a href="#buy" class="buy-btn">
-      Buy now<span class="buy-price">— $20</span>
+    <h2>Free to use, study, modify, and share</h2>
+    <a href="https://github.com/ewan-m/akai-eie-pro" class="download-btn">
+      Open the repository
     </a>
-    <span class="buy-note">Questions? <a href="mailto:ewan@interslice.com"
+    <span class="download-note">Questions? <a href="mailto:ewan@interslice.com"
         style="color:inherit;text-decoration:underline">ewan@interslice.com</a></span>
   </section>
 
   <footer>
-    <p>Interslice Tech Limited · Glasgow, Scotland<br>Not affiliated with Akai Professional or inMusic.</p>
-    <p><a href="https://github.com/interslice">GitHub</a></p>
+    <p>Free software under GPL v2<br>Not affiliated with Akai Professional or inMusic.</p>
+    <p><a href="https://github.com/ewan-m/akai-eie-pro">GitHub</a></p>
   </footer>
 
 </body>

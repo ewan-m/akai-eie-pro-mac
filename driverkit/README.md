@@ -124,19 +124,43 @@ The app bundle is written to:
 driverkit/build/local/AkaiEieActivator.app
 ```
 
-System Extensions normally require the containing app to run from
-`/Applications`. For that path:
+## Local Install / Activation
+
+This local app is ad-hoc signed for development. It is not a polished,
+notarized installer, so macOS security policy has to allow local DriverKit
+system-extension development.
+
+Ozzy's kext README uses `csrutil enable --without kext` in Recovery Mode
+because that backend is a kernel extension. This project is a DriverKit system
+extension, so use the System Extensions development path instead:
+
+1. On Apple Silicon, boot Recovery, open Startup Security Utility, and use
+   Reduced Security. If macOS offers an option for user-managed system
+   extensions, enable it.
+2. Boot back into macOS and enable System Extensions developer mode:
+
+   ```bash
+   systemextensionsctl developer on
+   ```
+
+3. Drag `driverkit/build/local/AkaiEieActivator.app` into `/Applications`, or
+   copy and launch it from Terminal:
+
+   ```bash
+   ditto driverkit/build/local/AkaiEieActivator.app /Applications/AkaiEieActivator.app
+   open /Applications/AkaiEieActivator.app
+   ```
+
+4. Click `Activate Driver`.
+5. When macOS blocks the new system extension, open System Settings -> Privacy
+   & Security and approve/enable the AKAI EIE Pro driver. Restart if macOS
+   asks.
+
+The containing app should normally run from `/Applications`. For quick local
+build-path iteration, System Extensions developer mode also allows running the
+same app from `driverkit/build/local`:
 
 ```bash
-ditto driverkit/build/local/AkaiEieActivator.app /Applications/AkaiEieActivator.app
-open /Applications/AkaiEieActivator.app
-```
-
-For local build-path iteration after disabling SIP, enable System Extensions
-developer mode once and run the app from `driverkit/build/local`:
-
-```bash
-systemextensionsctl developer on
 open driverkit/build/local/AkaiEieActivator.app
 ```
 
@@ -147,66 +171,30 @@ to `Reload Driver`. For a subsequent local build, stop audio playback and press
 embedded replacement after the previous dext has released the USB device.
 Approve the macOS authorization prompt if deactivation requires it.
 `Deactivate Driver` removes the active driver without installing another
-build. If a request fails, the app log shows the `NSError` and
-launch-location guidance; `sysextd` logs provide the next validation failure.
+build. If a request fails, the app shows the `NSError` and launch-location
+guidance; fix activation before DAW testing.
 
-## Playback Test
+## Audio Test
 
-The current transport is playback-only at `48000` Hz, configures the USB
-device itself, and claims the output USB interface plus interface 1 for
-device-clock feedback. Keep the interface connected for normal `Reload Driver`
-iterations; physically reconnect it only once if a previously crashed/replaced
-dext has left macOS with a stale attachment.
+The current transport exposes one 4-channel output stream and one 4-channel
+input stream at `48000` Hz. It configures the USB device itself, claims the
+output interface, claims the capture interface, and uses interface 1 for
+device-clock feedback. Keep speaker/headphone levels low while testing local
+builds.
 
-```bash
-log stream --style compact --predicate 'eventMessage CONTAINS[c] "AkaiEie" OR process == "coreaudiod"'
-```
-
-Starting audio should produce logs like:
-
-```text
-AkaiEieDriver::CaptureUsbProvider matched AKAI EIE Pro 09e8:0010 configuration 1
-AkaiEieDriver::OpenPlaybackInterface output endpoint 0x02 ... intervalMicroframes=1 ... periodMicroframes=40
-AkaiEieDriver::OpenSyncEndpoint found sync endpoint 0x81 maxPacket=64 intervalMicroframes=8 reportsPerPeriod=5
-AkaiEieDriver::ValidateSyncClock observed device-clock report frames=... attempt=...
-AkaiEieDriver::StartSyncTransfers started on endpoint 0x81
-AkaiEieDriver::StartPlayback started validated USB clock and initial silent output lead
-AkaiEieDriver::StartPlayback ready 48 kHz endpoint 0x02
-AkaiEieDriver::StartAudioClock validated device feedback base=...
-AkaiEieDevice::StartIO
-```
-
-Before CoreAudio starts, a silent USB prime waits for a real device-clock
-report so the initial zero timestamp comes from hardware. Running feedback is
-read one report at a time and added to the frames elapsed counter; playback
-consumes the accumulated value when preparing each output transfer. DriverKit
-keeps 64 single-report reads queued so feedback remains fine grained without a
-two-millisecond scheduling cliff. Empty or out-of-phase sync reads are counted
-but are not treated as playback shutdown conditions. If USB setup or transfer
-submission fails, `StartDevice StartPlayback failed`, `ValidateSyncClock`, or
-`FailPlaybackStream` identifies the next transport issue.
-The current eight-transfer plus 16 ms scheduling lead is reported to CoreAudio
-as transport latency/safety offset; it is intentionally conservative while
-validating continuous output and must be reduced and measured before this is a
-low-latency studio-ready driver.
-Stopping playback logs ring/USB counters followed by
-`AkaiEieDriver::StopPlayback drained`. For audible playback evidence,
-`nonzeroTransfers` should closely follow `transfers` while continuous
-non-silent output is active, and `nonzeroBytes` must be non-zero. For continuous
-feedback, `syncFrames` should advance with the USB output.
-`scheduleRecoveries` identifies loss of queued OUT runway; `noFeedback` and
-`feedbackMismatch` identify feedback starvation or a feedback total outside
-the accepted period window. `syncMissing` shows the report cadence/phase
-observed on macOS rather than forcing a stream stop. Input is intentionally
-silent until capture is implemented.
+After activation, open Audio MIDI Setup and confirm the AKAI EIE Pro appears as
+a 4-in/4-out USB device at `48000` Hz. Then test playback and microphone input
+in the DAW with the device set to 48 kHz. For normal `Reload Driver`
+iterations, keep the interface connected; physically reconnect it only once if
+a previously crashed/replaced dext has left macOS with a stale attachment.
 
 ## Immediate Build Order
 
 1. Activate the local dext and confirm the 4-in/4-out AudioDriverKit device
    appears in Audio MIDI Setup.
-2. Test the playback-only `IsochIO` path at `48000` Hz.
-3. Add capture `AsyncIO`.
-4. Add sample-rate configuration changes.
+2. Validate continuous playback and capture at `48000` Hz in DAWs.
+3. Add sample-rate configuration changes.
+4. Measure and tune latency/buffer-size reporting.
 
 ## Apple References
 

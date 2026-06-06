@@ -68,8 +68,7 @@ reject the ad-hoc signed DriverKit extension on the default security policy.
      systemextensionsctl developer on
      ```
 
-   Ozzy's macOS README uses `csrutil enable --without kext` for its kernel
-   extension backend. This project is a DriverKit system extension, so the
+   This project is a DriverKit system extension, so the
    important part is allowing local system-extension development builds.
 
 3. Drag `driverkit/build/local/AkaiEieActivator.app` into `/Applications`, or

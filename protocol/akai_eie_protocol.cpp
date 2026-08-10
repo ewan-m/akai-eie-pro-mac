@@ -194,7 +194,8 @@ namespace akai_eie
 			frames_wanted = 480;
 			break;
 		default:
-			frames_wanted = (sample_rate * 5) / 1000;
+			frames_wanted = static_cast<std::uint32_t>(
+				(static_cast<std::uint64_t>(sample_rate) * 5) / 1000);
 			break;
 		}
 
@@ -212,12 +213,19 @@ namespace akai_eie
 	{
 		if (packet_count == 0 || bytes_per_frame == 0 || packets == nullptr)
 			return false;
+		if (static_cast<std::uint64_t>(frames_wanted) * bytes_per_frame >
+			UINT32_MAX)
+		{
+			return false;
+		}
 
 		std::uint32_t frames_filled = 0;
 		for (std::uint32_t i = 0; i < packet_count; ++i)
 		{
 			const std::uint32_t next_frame = static_cast<std::uint32_t>(
-				(static_cast<std::uint64_t>(frames_wanted) * (i + 1)) / packet_count);
+				(static_cast<std::uint64_t>(frames_wanted) *
+				 (static_cast<std::uint64_t>(i) + 1)) /
+				packet_count);
 			const std::uint32_t packet_frames = next_frame - frames_filled;
 			packets[i].offset_bytes = static_cast<std::uint32_t>(
 				static_cast<std::uint64_t>(frames_filled) * bytes_per_frame);
@@ -274,11 +282,14 @@ namespace akai_eie
 							  std::uint8_t *usb_buffer, std::size_t usb_buffer_bytes,
 							  std::size_t *bytes_written) noexcept
 	{
+		if (usb_buffer == nullptr ||
+			frames_wanted > usb_buffer_bytes / kPlaybackBytesPerFrame)
+		{
+			return false;
+		}
+
 		const std::size_t bytes_wanted =
 			static_cast<std::size_t>(frames_wanted) * kPlaybackBytesPerFrame;
-
-		if (usb_buffer == nullptr || bytes_wanted > usb_buffer_bytes)
-			return false;
 
 		if (bytes_written != nullptr)
 			*bytes_written = bytes_wanted;

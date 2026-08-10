@@ -56,15 +56,22 @@ kern_return_t IMPL(AkaiEieDriver, Start)
 
 	ret = CaptureUsbProvider(provider);
 	if (ret != kIOReturnSuccess)
+	{
+		CloseUsbProvider();
 		return ret;
+	}
 
 	ivars->workQueue = GetWorkQueue();
 	if (!ivars->workQueue)
+	{
+		CloseUsbProvider();
 		return kIOReturnNoMemory;
+	}
 
 	ret = CreateAudioDevice();
 	if (ret != kIOReturnSuccess)
 	{
+		ivars->audioDevice.reset();
 		CloseUsbProvider();
 		return ret;
 	}
@@ -893,7 +900,6 @@ kern_return_t AkaiEieDriver::StartPlayback()
 	__atomic_store_n(&ivars->syncClockBaseFrames, 0, __ATOMIC_RELAXED);
 	__atomic_store_n(&ivars->syncLastHostTime, 0, __ATOMIC_RELAXED);
 	__atomic_store_n(&ivars->syncFramesElapsed, 0, __ATOMIC_RELAXED);
-	__atomic_store_n(&ivars->playbackHasReceivedFrames, false, __ATOMIC_RELAXED);
 	__atomic_store_n(&ivars->playbackTransfersStarted, false, __ATOMIC_RELAXED);
 	__atomic_store_n(&ivars->captureRunning, false, __ATOMIC_RELAXED);
 	ivars->playbackTimingState = {};
@@ -989,10 +995,6 @@ kern_return_t AkaiEieDriver::EnqueuePlaybackFrames(const float *frames,
 		&ivars->playbackWriteFrame,
 		writeFrame + frameCount,
 		__ATOMIC_RELEASE);
-	__atomic_store_n(
-		&ivars->playbackHasReceivedFrames,
-		true,
-		__ATOMIC_RELEASE);
 	return kIOReturnSuccess;
 }
 
@@ -1022,23 +1024,21 @@ kern_return_t AkaiEieDriver::StoreCaptureBytes(const uint8_t *bytes,
 
 	const uint64_t writeFrame =
 		__atomic_load_n(&ivars->captureWriteFrame, __ATOMIC_RELAXED);
-	const uint64_t minimumReadFrame =
-		writeFrame + frameCount > akai_eie_driver::kCaptureRingFrameCount
-			? writeFrame + frameCount -
-				  akai_eie_driver::kCaptureRingFrameCount
-			: 0;
-	uint64_t readFrame =
+	const uint64_t readFrame =
 		__atomic_load_n(&ivars->captureReadFrame, __ATOMIC_ACQUIRE);
-	while (readFrame < minimumReadFrame &&
-		   !__atomic_compare_exchange_n(
-			   &ivars->captureReadFrame,
-			   &readFrame,
-			   minimumReadFrame,
-			   false,
-			   __ATOMIC_RELEASE,
-			   __ATOMIC_ACQUIRE))
-	{
-	}
+	const uint64_t queuedFrames =
+		writeFrame > readFrame ? writeFrame - readFrame : 0;
+	const uint32_t writableFrames =
+		queuedFrames < akai_eie_driver::kCaptureRingFrameCount
+			? static_cast<uint32_t>(
+				  akai_eie_driver::kCaptureRingFrameCount - queuedFrames)
+			: 0;
+	// Only the audio reader advances captureReadFrame. Moving it here to keep
+	// newer input would allow this writer to overwrite a frame mid-copy.
+	if (frameCount > writableFrames)
+		frameCount = writableFrames;
+	if (frameCount == 0)
+		return kIOReturnSuccess;
 
 	uint32_t decodedFrames = 0;
 	while (decodedFrames < frameCount)
@@ -1630,7 +1630,6 @@ void AkaiEieDriver::ReleasePlaybackResources()
 	ivars->playbackInFlight = 0;
 	ivars->playbackMaxPacketSize = 0;
 	ivars->playbackIntervalMicroframes = 0;
-	ivars->playbackHasReceivedFrames = false;
 	ivars->playbackTransfersStarted = false;
 }
 

@@ -94,7 +94,6 @@ struct AkaiEieDriver_IVars
 	bool usbDeviceOpen;
 	bool playbackInterfaceOpen;
 	bool dataInterfaceOpen;
-	bool playbackHasReceivedFrames;
 	bool playbackTransfersStarted;
 	bool playbackStopPending;
 	bool playbackRunning;

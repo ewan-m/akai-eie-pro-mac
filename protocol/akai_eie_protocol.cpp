@@ -64,6 +64,45 @@ namespace akai_eie
 			data[4] = 0;
 		}
 
+		std::uint64_t LoadLE64(const std::uint8_t *in) noexcept
+		{
+			// Byte-wise assembly keeps this endian-independent; clang folds it
+			// to a single load on little-endian targets.
+			std::uint64_t value = 0;
+			for (std::uint32_t i = 0; i < 8; ++i)
+				value |= static_cast<std::uint64_t>(in[i]) << (8 * i);
+			return value;
+		}
+
+		// Packs bit 0 of each of the 8 bytes in `lanes` into one byte, with byte 0
+		// landing in the most significant bit. `lanes` must only have bit 0 of
+		// each byte set; the multiply then places every lane bit at a distinct
+		// position, so no carries corrupt the top byte.
+		std::uint32_t GatherLaneBitsMsbFirst(std::uint64_t lanes) noexcept
+		{
+			return static_cast<std::uint32_t>(
+				(lanes * 0x8040201008040201ull) >> 56);
+		}
+
+		// Each capture channel is serialised MSB-first across 24 consecutive
+		// bytes, one bit per byte. Decodes the bit-0 and bit-1 lanes together.
+		void DecodeCaptureLanePair(const std::uint8_t *bytes,
+								   std::uint32_t &bit0_sample,
+								   std::uint32_t &bit1_sample) noexcept
+		{
+			constexpr std::uint64_t kLaneMask = 0x0101010101010101ull;
+			bit0_sample = 0;
+			bit1_sample = 0;
+			for (std::uint32_t group = 0; group < 3; ++group)
+			{
+				const std::uint64_t word = LoadLE64(bytes + group * 8);
+				bit0_sample = (bit0_sample << 8) |
+							  GatherLaneBitsMsbFirst(word & kLaneMask);
+				bit1_sample = (bit1_sample << 8) |
+							  GatherLaneBitsMsbFirst((word >> 1) & kLaneMask);
+			}
+		}
+
 		std::int32_t SignExtend24(std::uint32_t value) noexcept
 		{
 			value &= 0x00ffffffu;
@@ -84,17 +123,19 @@ namespace akai_eie
 
 		std::int32_t Float32ToS24(float sample) noexcept
 		{
-			if (!(sample == sample))
-				return 0;
-			if (sample >= 1.0f)
-				return 0x7fffff;
-			if (sample <= -1.0f)
-				return -0x800000;
+			// Written as selects rather than early returns so the compiler emits
+			// branch-free code: audio crosses zero constantly and mispredicts.
+			// NaN fails every comparison and is mapped to silence first.
+			float clamped = sample == sample ? sample : 0.0f;
+			clamped = clamped > 1.0f ? 1.0f : clamped;
+			clamped = clamped < -1.0f ? -1.0f : clamped;
 
-			const float scale = sample < 0.0f ? 8388608.0f : 8388607.0f;
-			const float scaled = sample * scale;
-			return static_cast<std::int32_t>(
-				scaled >= 0.0f ? scaled + 0.5f : scaled - 0.5f);
+			const float scale = clamped < 0.0f ? 8388608.0f : 8388607.0f;
+			const float scaled = clamped * scale;
+			const std::int32_t rounded = static_cast<std::int32_t>(
+				scaled + (scaled >= 0.0f ? 0.5f : -0.5f));
+			// At +1.0 the +0.5 rounds up to 2^23 in float, so clamp the result.
+			return rounded > 0x7fffff ? 0x7fffff : rounded;
 		}
 
 		bool IsSupportedChannelCount(std::uint32_t channels) noexcept
@@ -244,12 +285,15 @@ namespace akai_eie
 		if (pcm == nullptr || out_frame == nullptr)
 			return false;
 
-		for (std::uint32_t channel = 0; channel < kPlaybackChannelCount; ++channel)
-		{
-			const std::uint32_t sample_bits = Sample24Bits(
-				Float32ToS24(pcm[channel]));
-			WriteLE24(out_frame + channel * 3, sample_bits);
-		}
+		const std::uint32_t s0 = Sample24Bits(Float32ToS24(pcm[0]));
+		const std::uint32_t s1 = Sample24Bits(Float32ToS24(pcm[1]));
+		const std::uint32_t s2 = Sample24Bits(Float32ToS24(pcm[2]));
+		const std::uint32_t s3 = Sample24Bits(Float32ToS24(pcm[3]));
+
+		// Four packed 24-bit samples are exactly three 32-bit little-endian words.
+		WriteLE32(out_frame + 0, s0 | (s1 << 24));
+		WriteLE32(out_frame + 4, (s1 >> 8) | (s2 << 16));
+		WriteLE32(out_frame + 8, (s2 >> 16) | (s3 << 8));
 
 		return true;
 	}
@@ -332,19 +376,10 @@ namespace akai_eie
 		std::uint32_t ch3 = 0;
 		std::uint32_t ch4 = 0;
 
-		for (std::uint32_t j = 0; j < 24; ++j)
-		{
-			ch1 |= static_cast<std::uint32_t>(frame[j] & 1u) << (23 - j);
-			ch3 |= static_cast<std::uint32_t>((frame[j] & 2u) >> 1)
-				   << (23 - j);
-		}
-
-		for (std::uint32_t j = 32; j < 56; ++j)
-		{
-			ch2 |= static_cast<std::uint32_t>(frame[j] & 1u) << (55 - j);
-			ch4 |= static_cast<std::uint32_t>((frame[j] & 2u) >> 1)
-				   << (55 - j);
-		}
+		// Bytes 0-23 carry ch1 (bit 0) and ch3 (bit 1); bytes 32-55 carry ch2
+		// and ch4 the same way.
+		DecodeCaptureLanePair(frame, ch1, ch3);
+		DecodeCaptureLanePair(frame + 32, ch2, ch4);
 
 		return {SignExtend24(ch1), SignExtend24(ch2), SignExtend24(ch3),
 				SignExtend24(ch4)};
@@ -352,9 +387,12 @@ namespace akai_eie
 
 	float S24ToFloat32(std::int32_t sample) noexcept
 	{
-		return sample < 0
-				   ? static_cast<float>(sample / 8388608.0f)
-				   : static_cast<float>(sample / 8388607.0f);
+		// Reciprocal multiply instead of a divide per sample; the select compiles
+		// branch-free.
+		constexpr float kNegativeScale = 1.0f / 8388608.0f;
+		constexpr float kPositiveScale = 1.0f / 8388607.0f;
+		return static_cast<float>(sample) *
+			   (sample < 0 ? kNegativeScale : kPositiveScale);
 	}
 
 	bool DecodeCaptureUsbFrameToFloat32(

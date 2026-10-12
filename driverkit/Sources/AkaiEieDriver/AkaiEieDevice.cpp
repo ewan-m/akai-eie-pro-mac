@@ -69,9 +69,7 @@ bool AkaiEieDevice::init(IOUserAudioDriver *driver,
 		return false;
 
 	(void)SetInputSafetyOffset(akai_eie_driver::kInputSafetyOffsetFrames);
-	(void)SetOutputSafetyOffset(akai_eie_driver::kOutputSafetyOffsetFrames);
-	(void)SetInputLatency(0);
-	(void)SetOutputLatency(akai_eie_driver::kOutputTransportLatencyFrames);
+	ApplyRateLatencies(akai_eie_driver::kDefaultSampleRateHz);
 	(void)SetPreferredChannelsForStereo(1, 2);
 
 	IOUserAudioChannelLabel labels[akai_eie_driver::kChannelCount] = {
@@ -98,6 +96,8 @@ bool AkaiEieDevice::init(IOUserAudioDriver *driver,
 
 	  if (ivars == nullptr || !ivars->ioStarted)
 		  return kIOReturnSuccess;
+	  if (ivars->transportDriver != nullptr)
+		  ivars->transportDriver->NoteIOCycleFrames(ioBufferFrameSize);
 
 	  if (operation == IOUserAudioIOOperationBeginRead)
 		  return ReadInputFrames(sampleTime, ioBufferFrameSize);
@@ -112,6 +112,14 @@ bool AkaiEieDevice::init(IOUserAudioDriver *driver,
 		return false;
 
 	return true;
+}
+
+void AkaiEieDevice::ApplyRateLatencies(uint32_t sampleRateHz)
+{
+	(void)SetOutputSafetyOffset(
+		akai_eie_driver::OutputSafetyOffsetFrames(sampleRateHz));
+	(void)SetInputLatency(akai_eie_driver::InputLatencyFrames(sampleRateHz));
+	(void)SetOutputLatency(akai_eie_driver::OutputLatencyFrames(sampleRateHz));
 }
 
 void AkaiEieDevice::SetTransportDriver(AkaiEieDriver *driver)
@@ -192,9 +200,13 @@ kern_return_t AkaiEieDevice::ConfigureStreams(IOUserAudioDriver *driver)
 	(void)ivars->outputStream->SetLatency(0);
 	(void)ivars->inputStream->SetLatency(0);
 
-	IOUserAudioStreamBasicDescription formats[] = {
-		MakeFloat32StreamFormat(akai_eie_driver::kDefaultSampleRateHz),
-	};
+	IOUserAudioStreamBasicDescription
+		formats[CountOf(akai_eie_driver::kSupportedSampleRates)];
+	for (uint32_t index = 0; index < CountOf(formats); ++index)
+	{
+		formats[index] = MakeFloat32StreamFormat(
+			akai_eie_driver::kSupportedSampleRates[index]);
+	}
 
 	ret = ivars->outputStream->SetAvailableStreamFormats(
 		formats, CountOf(formats));
@@ -369,14 +381,15 @@ kern_return_t AkaiEieDevice::HandleChangeSampleRate(double sampleRate)
 	if (!akai_eie_driver::IsSupportedSampleRate(sampleRate))
 		return kIOReturnUnsupported;
 
+	// The HAL stops IO before a configuration change, so the transport picks
+	// the new rate up from its next StartPlayback reset sequence. The
+	// zero-timestamp period is a fixed frame count and does not change.
 	const uint32_t sampleRateHz = static_cast<uint32_t>(sampleRate);
-	ivars->zeroTimestampPeriod =
-		akai_eie_driver::ZeroTimestampPeriod(sampleRateHz);
-	kern_return_t ret = SetZeroTimeStampPeriod(ivars->zeroTimestampPeriod);
-	if (ret != kIOReturnSuccess)
-		return ret;
+	if (ivars->transportDriver != nullptr)
+		ivars->transportDriver->SetTransportSampleRate(sampleRateHz);
+	ApplyRateLatencies(sampleRateHz);
 
-	ret = SetSampleRate(sampleRate);
+	kern_return_t ret = SetSampleRate(sampleRate);
 	if (ret != kIOReturnSuccess)
 		return ret;
 

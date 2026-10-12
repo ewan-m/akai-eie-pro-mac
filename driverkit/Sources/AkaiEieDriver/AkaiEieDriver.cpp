@@ -2,6 +2,7 @@
 #include <DriverKit/DriverKit.h>
 #include <USBDriverKit/AppleUSBDescriptorParsing.h>
 #include <USBDriverKit/USBDriverKit.h>
+#include <os/log.h>
 #include <string.h>
 
 #include "AkaiEieDriver.h"
@@ -16,6 +17,7 @@ bool AkaiEieDriver::init()
 	ivars = IONewZero(AkaiEieDriver_IVars, 1);
 	if (ivars == nullptr)
 		return false;
+	ivars->sampleRateHz = akai_eie_driver::kDefaultSampleRateHz;
 
 	ivars->driverName = OSSharedPtr<OSString>(
 		OSString::withCString(akai_eie_driver::kDriverName),
@@ -138,8 +140,7 @@ kern_return_t AkaiEieDriver::CreateAudioDevice()
 		ivars->deviceUid.get(),
 		ivars->modelUid.get(),
 		ivars->manufacturerName.get(),
-		akai_eie_driver::ZeroTimestampPeriod(
-			akai_eie_driver::kDefaultSampleRateHz));
+		akai_eie_driver::kZeroTimestampPeriodFrames);
 	if (!ok)
 		return kIOReturnNoMemory;
 
@@ -164,12 +165,26 @@ kern_return_t AkaiEieDriver::StartDevice(IOUserAudioObjectID objectId,
 
 	kern_return_t ret = StartPlayback();
 	if (ret != kIOReturnSuccess)
+	{
+		os_log(OS_LOG_DEFAULT, "AkaiEie: StartPlayback failed 0x%x", ret);
 		return ret;
+	}
 
 	ret = super::StartDevice(objectId, flags);
 	if (ret != kIOReturnSuccess)
 		StopPlayback();
 	return ret;
+}
+
+void AkaiEieDriver::SetTransportSampleRate(uint32_t sampleRateHz)
+{
+	if (ivars == nullptr || !akai_eie::IsSupportedSampleRate(sampleRateHz))
+		return;
+	if (__atomic_load_n(&ivars->playbackRunning, __ATOMIC_ACQUIRE))
+		os_log(OS_LOG_DEFAULT,
+			   "AkaiEie: sample rate set to %u while running; applies on next start",
+			   sampleRateHz);
+	__atomic_store_n(&ivars->sampleRateHz, sampleRateHz, __ATOMIC_RELEASE);
 }
 
 kern_return_t AkaiEieDriver::StartAudioClock()
@@ -185,11 +200,17 @@ kern_return_t AkaiEieDriver::StartAudioClock()
 	const uint64_t hostTime =
 		__atomic_load_n(&ivars->syncLastHostTime, __ATOMIC_ACQUIRE);
 	if (feedbackFrames == 0 || hostTime == 0)
+	{
+		os_log(OS_LOG_DEFAULT, "AkaiEie: audio clock not ready (feedback %llu, host time %llu)",
+			   feedbackFrames, hostTime);
 		return kIOReturnNotReady;
+	}
 
 	__atomic_store_n(
 		&ivars->syncClockBaseFrames, feedbackFrames, __ATOMIC_RELEASE);
 	ivars->playbackTimestampFrames = 0;
+	ivars->timestampPrevClockFrames = 0;
+	ivars->timestampPrevHostTime = hostTime;
 	ivars->audioDevice->UpdatePlaybackTimestamp(0, hostTime);
 	(void)ivars->audioDevice->SetClockIsStable(true);
 	return kIOReturnSuccess;
@@ -534,10 +555,8 @@ kern_return_t AkaiEieDriver::SubmitSyncTransfer(uint32_t index)
 		frame.timeStamp = 0;
 	}
 
-	memset(transfer.dataAddress, 0,
-		   ivars->syncMaxPacketSize *
-			   akai_eie_driver::kSyncPacketsPerTransfer);
-
+	// No need to clear the data buffer: SyncComplete only reads it when the
+	// frame reports a non-zero completeCount.
 	transfer.submitted = true;
 	++ivars->syncInFlight;
 	const kern_return_t ret = ivars->syncPipe->IsochIO(
@@ -563,8 +582,9 @@ kern_return_t AkaiEieDriver::SubmitCaptureTransfer(uint32_t index)
 		return kIOReturnNotReady;
 	}
 
+	// CaptureComplete only consumes actualByteCount bytes, so stale data past
+	// that point is never read and the buffer needs no clearing.
 	AkaiEieCaptureTransfer &transfer = ivars->captureTransfers[index];
-	memset(transfer.dataAddress, 0, akai_eie_driver::kCaptureTransferBytes);
 	transfer.submitted = true;
 	++ivars->captureInFlight;
 	const kern_return_t ret = ivars->capturePipe->AsyncIO(
@@ -586,6 +606,9 @@ kern_return_t AkaiEieDriver::ValidateSyncClock()
 		return kIOReturnNotReady;
 
 	AkaiEieSyncTransfer &transfer = ivars->syncTransfers[0];
+	const uint32_t sampleRateHz = ivars->sampleRateHz;
+	const uint32_t expectedPerMs = sampleRateHz / 1000;
+	uint32_t lastFeedback = 0;
 	uint64_t lastHostTime = 0;
 	for (uint32_t attempt = 0;
 		 attempt < akai_eie_driver::kSyncPrimeAttemptCount;
@@ -619,8 +642,13 @@ kern_return_t AkaiEieDriver::ValidateSyncClock()
 			continue;
 
 		const uint8_t feedback = transfer.dataAddress[0];
+		lastFeedback = feedback;
 		lastHostTime = frame.timeStamp;
-		if (!akai_eie::IsReasonableSyncFeedback(feedback))
+		// The HAL clock is built from these reports, so they must be in frames
+		// of the active rate. Refuse to start rather than run the clock at the
+		// wrong speed if the device reports in other units.
+		if (!akai_eie::IsReasonableSyncFeedback(feedback, sampleRateHz) ||
+			feedback < expectedPerMs / 2)
 			continue;
 
 		if (lastHostTime != 0)
@@ -639,6 +667,9 @@ kern_return_t AkaiEieDriver::ValidateSyncClock()
 		}
 	}
 
+	os_log(OS_LOG_DEFAULT,
+		   "AkaiEie: no usable sync report at %u Hz (last %u frames/ms, expected ~%u)",
+		   sampleRateHz, lastFeedback, expectedPerMs);
 	return kIOReturnNotResponding;
 }
 
@@ -749,6 +780,24 @@ kern_return_t AkaiEieDriver::OpenPlaybackInterface()
 		return kIOReturnUnsupported;
 	}
 
+	// Transfers can carry one frame over nominal (sync feedback, or 44.1 kHz's
+	// 220/221 alternation), split across kPlaybackIsoPacketCount packets.
+	const uint32_t maxTransferFrames =
+		akai_eie_driver::TransferFrames(ivars->sampleRateHz) + 2;
+	const uint32_t maxPacketFrames =
+		(maxTransferFrames + akai_eie_driver::kPlaybackIsoPacketCount - 1) /
+		akai_eie_driver::kPlaybackIsoPacketCount;
+	if (maxPacketFrames * akai_eie_driver::kPlaybackBytesPerUsbFrame >
+		ivars->playbackMaxPacketSize)
+	{
+		os_log(OS_LOG_DEFAULT,
+			   "AkaiEie: %u Hz needs %u-byte packets, endpoint allows %u",
+			   ivars->sampleRateHz,
+			   maxPacketFrames * akai_eie_driver::kPlaybackBytesPerUsbFrame,
+			   ivars->playbackMaxPacketSize);
+		return kIOReturnUnsupported;
+	}
+
 	return kIOReturnSuccess;
 }
 
@@ -756,7 +805,7 @@ kern_return_t AkaiEieDriver::SendPlaybackSetup()
 {
 	akai_eie::ControlTransfer transfers[akai_eie::kResetControlTransferCount]{};
 	const size_t transferCount = akai_eie::BuildResetControlTransfers(
-		akai_eie_driver::kDefaultSampleRateHz,
+		ivars->sampleRateHz,
 		transfers,
 		akai_eie::kResetControlTransferCount);
 	if (transferCount != akai_eie::kResetControlTransferCount)
@@ -904,6 +953,11 @@ kern_return_t AkaiEieDriver::StartPlayback()
 	__atomic_store_n(&ivars->captureRunning, false, __ATOMIC_RELAXED);
 	ivars->playbackTimingState = {};
 	ivars->playbackTimestampFrames = 0;
+	ivars->timestampPrevClockFrames = 0;
+	ivars->timestampPrevHostTime = 0;
+	ivars->playbackPrimed = false;
+	ivars->captureReaderPrimed = false;
+	ivars->latencySampleCount = 0;
 
 	kern_return_t ret = OpenPlaybackInterface();
 	if (ret == kIOReturnSuccess)
@@ -1076,6 +1130,12 @@ kern_return_t AkaiEieDriver::StoreCaptureBytes(const uint8_t *bytes,
 	return kIOReturnSuccess;
 }
 
+void AkaiEieDriver::NoteIOCycleFrames(uint32_t frameCount)
+{
+	if (ivars != nullptr)
+		__atomic_store_n(&ivars->ioCycleFrames, frameCount, __ATOMIC_RELAXED);
+}
+
 kern_return_t AkaiEieDriver::CopyCaptureFrames(float *frames, uint32_t frameCount)
 {
 	if (frames == nullptr || frameCount == 0)
@@ -1085,24 +1145,46 @@ kern_return_t AkaiEieDriver::CopyCaptureFrames(float *frames, uint32_t frameCoun
 		!__atomic_load_n(&ivars->captureRunning, __ATOMIC_ACQUIRE))
 		return kIOReturnNotReady;
 
-	const uint64_t readFrame =
+	uint64_t readFrame =
 		__atomic_load_n(&ivars->captureReadFrame, __ATOMIC_RELAXED);
 	const uint64_t writeFrame =
 		__atomic_load_n(&ivars->captureWriteFrame, __ATOMIC_ACQUIRE);
 	const uint64_t availableFrames =
 		writeFrame > readFrame ? writeFrame - readFrame : 0;
-	const uint32_t framesToCopy =
-		availableFrames < frameCount
-			? static_cast<uint32_t>(availableFrames)
-			: frameCount;
+
+	// USB delivers capture in 64-frame bulk chunks with completion jitter, so
+	// keep a cushion queued instead of draining the ring to empty every cycle.
+	// On underrun, output one cycle of silence and rebuild the cushion rather
+	// than splicing a fragment against zeros.
+	const uint64_t targetFrames =
+		static_cast<uint64_t>(frameCount) +
+		akai_eie_driver::CapturePrimeFrames(
+			__atomic_load_n(&ivars->sampleRateHz, __ATOMIC_RELAXED));
+	if (!ivars->captureReaderPrimed && availableFrames >= targetFrames)
+		ivars->captureReaderPrimed = true;
+	if (ivars->captureReaderPrimed && availableFrames < frameCount)
+		ivars->captureReaderPrimed = false;
+	if (!ivars->captureReaderPrimed)
+	{
+		memset(frames, 0,
+			   static_cast<size_t>(frameCount) * akai_eie_driver::kBytesPerFrame);
+		return kIOReturnSuccess;
+	}
+	// A backlog only builds when the HAL skipped cycles; drop it so input
+	// latency returns to the cushion. Only this reader advances readFrame.
+	if (availableFrames >
+		targetFrames + akai_eie_driver::kCaptureMaxExcessFrames)
+	{
+		readFrame = writeFrame - targetFrames;
+	}
 
 	uint32_t copiedFrames = 0;
-	while (copiedFrames < framesToCopy)
+	while (copiedFrames < frameCount)
 	{
 		const uint64_t sourceFrame = readFrame + copiedFrames;
 		const uint32_t firstRingFrame = static_cast<uint32_t>(
 			sourceFrame % akai_eie_driver::kCaptureRingFrameCount);
-		const uint32_t framesLeft = framesToCopy - copiedFrames;
+		const uint32_t framesLeft = frameCount - copiedFrames;
 		const uint32_t contiguousFrameCount =
 			framesLeft <=
 					akai_eie_driver::kCaptureRingFrameCount - firstRingFrame
@@ -1116,15 +1198,6 @@ kern_return_t AkaiEieDriver::CopyCaptureFrames(float *frames, uint32_t frameCoun
 			static_cast<size_t>(contiguousFrameCount) *
 				akai_eie_driver::kBytesPerFrame);
 		copiedFrames += contiguousFrameCount;
-	}
-	if (copiedFrames < frameCount)
-	{
-		memset(
-			frames + static_cast<size_t>(copiedFrames) *
-						 akai_eie_driver::kChannelCount,
-			0,
-			static_cast<size_t>(frameCount - copiedFrames) *
-				akai_eie_driver::kBytesPerFrame);
 	}
 
 	__atomic_store_n(
@@ -1191,7 +1264,7 @@ kern_return_t AkaiEieDriver::SubmitPlaybackTransfer(uint32_t index)
 	const uint32_t feedbackFrames =
 		__atomic_exchange_n(&ivars->syncFramesElapsed, 0, __ATOMIC_ACQ_REL);
 	const uint32_t framesWanted = akai_eie::CalculatePlaybackFramesWanted(
-		akai_eie_driver::kDefaultSampleRateHz,
+		ivars->sampleRateHz,
 		ivars->playbackTimingState,
 		feedbackFrames);
 	const uint32_t transferBytes =
@@ -1225,10 +1298,24 @@ kern_return_t AkaiEieDriver::SubmitPlaybackTransfer(uint32_t index)
 		__atomic_load_n(&ivars->playbackWriteFrame, __ATOMIC_ACQUIRE);
 	const uint64_t availableFrames =
 		writeFrame > readFrame ? writeFrame - readFrame : 0;
-	const uint32_t framesToCopy =
-		availableFrames < framesWanted
-			? static_cast<uint32_t>(availableFrames)
-			: framesWanted;
+
+	// The HAL writes whole IO cycles while USB drains 5 ms at a time, so wait
+	// for one cycle plus a jitter cushion before draining. After an underrun,
+	// send silence and keep the queued audio intact until the cushion is back,
+	// rather than playing a fragment followed by zeros.
+	const uint64_t primeFrames =
+		static_cast<uint64_t>(framesWanted) +
+		__atomic_load_n(&ivars->ioCycleFrames, __ATOMIC_RELAXED) +
+		akai_eie_driver::PlaybackPrimeFrames(ivars->sampleRateHz);
+	if (!ivars->playbackPrimed && availableFrames >= primeFrames)
+		ivars->playbackPrimed = true;
+	if (ivars->playbackPrimed && availableFrames < framesWanted)
+	{
+		ivars->playbackPrimed = false;
+		os_log(OS_LOG_DEFAULT, "AkaiEie: playback underrun (%llu of %u frames queued), re-priming",
+			   availableFrames, framesWanted);
+	}
+	const uint32_t framesToCopy = ivars->playbackPrimed ? framesWanted : 0;
 	const uint32_t firstRingFrame = static_cast<uint32_t>(
 		readFrame % akai_eie_driver::kPlaybackRingFrameCount);
 	const uint32_t firstFrameCount =
@@ -1309,7 +1396,51 @@ kern_return_t AkaiEieDriver::SubmitPlaybackTransfer(uint32_t index)
 		transfer.submitted = false;
 		--ivars->playbackInFlight;
 	}
+	else if (ivars->playbackPrimed)
+	{
+		RecordOutputLatency(currentFrame, availableFrames - framesToCopy);
+	}
 	return ret;
+}
+
+void AkaiEieDriver::RecordOutputLatency(uint64_t currentUsbFrame,
+										uint64_t fifoFrames)
+{
+	// A frame the HAL writes now queues behind the FIFO, which drains into
+	// transfers starting where the schedule currently ends.
+	const uint64_t scheduledBusFrames =
+		ivars->nextUsbFrame > currentUsbFrame
+			? ivars->nextUsbFrame - currentUsbFrame
+			: 0;
+	const uint64_t latencyFrames =
+		scheduledBusFrames * ivars->sampleRateHz / 1000 + fifoFrames;
+	const uint32_t latency = latencyFrames > UINT32_MAX
+								 ? UINT32_MAX
+								 : static_cast<uint32_t>(latencyFrames);
+
+	if (ivars->latencySampleCount == 0)
+	{
+		ivars->latencySumFrames = 0;
+		ivars->latencyMinFrames = latency;
+		ivars->latencyMaxFrames = latency;
+	}
+	ivars->latencySumFrames += latency;
+	if (latency < ivars->latencyMinFrames)
+		ivars->latencyMinFrames = latency;
+	if (latency > ivars->latencyMaxFrames)
+		ivars->latencyMaxFrames = latency;
+
+	if (++ivars->latencySampleCount < akai_eie_driver::kLatencyReportTransfers)
+		return;
+	os_log(OS_LOG_DEFAULT,
+		   "AkaiEie: output latency min %u avg %llu max %u frames (reported %u, IO cycle %u) at %u Hz",
+		   ivars->latencyMinFrames,
+		   ivars->latencySumFrames / ivars->latencySampleCount,
+		   ivars->latencyMaxFrames,
+		   akai_eie_driver::OutputLatencyFrames(ivars->sampleRateHz),
+		   __atomic_load_n(&ivars->ioCycleFrames, __ATOMIC_RELAXED),
+		   ivars->sampleRateHz);
+	ivars->latencySampleCount = 0;
 }
 
 void AkaiEieDriver::PlaybackComplete_Impl(OSAction *action, IOReturn status)
@@ -1386,7 +1517,7 @@ void AkaiEieDriver::SyncComplete_Impl(OSAction *action, IOReturn status)
 	if (frame.status == kIOReturnSuccess && frame.completeCount != 0)
 	{
 		const uint8_t feedback = transfer.dataAddress[0];
-		if (akai_eie::IsReasonableSyncFeedback(feedback))
+		if (akai_eie::IsReasonableSyncFeedback(feedback, ivars->sampleRateHz))
 		{
 			const uint64_t totalFeedbackFrames = __atomic_add_fetch(
 				&ivars->syncFeedbackFrames, feedback, __ATOMIC_ACQ_REL);
@@ -1404,16 +1535,35 @@ void AkaiEieDriver::SyncComplete_Impl(OSAction *action, IOReturn status)
 					? totalFeedbackFrames - clockBaseFrames
 					: 0;
 			const uint32_t timestampPeriod =
-				akai_eie_driver::ZeroTimestampPeriod(
-					akai_eie_driver::kDefaultSampleRateHz);
+				akai_eie_driver::kZeroTimestampPeriodFrames;
 			const uint64_t nextTimestampFrame =
 				ivars->playbackTimestampFrames + timestampPeriod;
 			if (clockFrames >= nextTimestampFrame && ivars->audioDevice)
 			{
+				// Reports arrive every ~48 frames, so the period boundary
+				// usually falls between two of them. Interpolate the host time
+				// at the boundary instead of stamping it with this report's
+				// time, which would jitter the HAL clock by up to 1 ms.
+				uint64_t timestampHostTime = frame.timeStamp;
+				const uint64_t prevClockFrames = ivars->timestampPrevClockFrames;
+				const uint64_t prevHostTime = ivars->timestampPrevHostTime;
+				if (prevHostTime != 0 &&
+					frame.timeStamp > prevHostTime &&
+					clockFrames > prevClockFrames &&
+					nextTimestampFrame >= prevClockFrames)
+				{
+					timestampHostTime =
+						prevHostTime +
+						(frame.timeStamp - prevHostTime) *
+							(nextTimestampFrame - prevClockFrames) /
+							(clockFrames - prevClockFrames);
+				}
 				ivars->playbackTimestampFrames = nextTimestampFrame;
 				ivars->audioDevice->UpdatePlaybackTimestamp(
-					nextTimestampFrame, frame.timeStamp);
+					nextTimestampFrame, timestampHostTime);
 			}
+			ivars->timestampPrevClockFrames = clockFrames;
+			ivars->timestampPrevHostTime = frame.timeStamp;
 		}
 	}
 
@@ -1477,11 +1627,11 @@ void AkaiEieDriver::CaptureComplete_Impl(OSAction *action,
 
 void AkaiEieDriver::FailPlaybackStream(IOReturn status)
 {
-	(void)status;
 	const bool wasRunning =
 		__atomic_exchange_n(&ivars->playbackRunning, false, __ATOMIC_ACQ_REL);
 	if (!wasRunning)
 		return;
+	os_log(OS_LOG_DEFAULT, "AkaiEie: USB stream failed 0x%x, stopping transport", status);
 	__atomic_store_n(&ivars->captureRunning, false, __ATOMIC_RELEASE);
 
 	if (ivars->audioDevice)

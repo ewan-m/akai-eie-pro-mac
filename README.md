@@ -12,9 +12,13 @@ while testing, and expect rough edges.
 - **DriverKit system extension**: the active implementation is in `driverkit/`
   and uses AudioDriverKit plus USBDriverKit.
 - **Playback/capture**: initial 4-out/4-in DriverKit path is working at
-  48 kHz in local Apple Silicon testing.
-- **Still to do**: sample-rate switching, latency tuning, signing, entitlement
-  approval, packaging, and broader macOS/DAW testing.
+  48 kHz in local Apple Silicon testing. 44.1, 88.2 and 96 kHz are exposed
+  and selectable from Audio MIDI Setup or a DAW but still need hardware
+  testing.
+- **Buffer size**: clients can pick the IO buffer size (CoreAudio's usual
+  range) from Audio MIDI Setup or their DAW.
+- **Still to do**: latency tuning, signing, entitlement approval, packaging,
+  and broader macOS/DAW testing.
 - **Shared protocol layer**: `protocol/` contains the AKAI-specific USB control
   sequence, packet sizing, playback packing, and capture decoding helpers used
   by the DriverKit code.

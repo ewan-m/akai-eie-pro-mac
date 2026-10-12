@@ -50,6 +50,7 @@ public:
 
 private:
 	kern_return_t ConfigureStreams(IOUserAudioDriver *driver) LOCALONLY;
+	void ApplyRateLatencies(uint32_t sampleRateHz) LOCALONLY;
 	kern_return_t MapStreamBuffers() LOCALONLY;
 	void UnmapStreamBuffers() LOCALONLY;
 	kern_return_t ReadInputFrames(uint64_t sampleTime, uint32_t frameCount) LOCALONLY;

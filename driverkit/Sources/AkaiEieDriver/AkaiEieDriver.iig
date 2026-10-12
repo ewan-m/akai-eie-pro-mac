@@ -78,6 +78,8 @@ struct AkaiEieDriver_IVars
 	uint64_t syncFeedbackFrames;
 	uint64_t syncClockBaseFrames;
 	uint64_t syncLastHostTime;
+	uint64_t timestampPrevClockFrames;
+	uint64_t timestampPrevHostTime;
 	uint32_t playbackInFlight;
 	uint32_t syncInFlight;
 	uint32_t captureInFlight;
@@ -85,6 +87,12 @@ struct AkaiEieDriver_IVars
 	uint32_t playbackIntervalMicroframes;
 	uint32_t syncIntervalMicroframes;
 	uint32_t syncReportsPerPlaybackPeriod;
+	uint32_t ioCycleFrames;
+	uint64_t latencySumFrames;
+	uint32_t latencyMinFrames;
+	uint32_t latencyMaxFrames;
+	uint32_t latencySampleCount;
+	uint32_t sampleRateHz;
 	uint16_t playbackMaxPacketSize;
 	uint16_t syncMaxPacketSize;
 	uint16_t captureMaxPacketSize;
@@ -98,6 +106,8 @@ struct AkaiEieDriver_IVars
 	bool playbackStopPending;
 	bool playbackRunning;
 	bool captureRunning;
+	bool playbackPrimed;
+	bool captureReaderPrimed;
 };
 
 class AkaiEieDriver : public IOUserAudioDriver
@@ -113,6 +123,8 @@ public:
 									 IOUserAudioStartStopFlags flags) override LOCALONLY;
 	kern_return_t EnqueuePlaybackFrames(const float *frames, uint32_t frameCount) LOCALONLY;
 	kern_return_t CopyCaptureFrames(float *frames, uint32_t frameCount) LOCALONLY;
+	void NoteIOCycleFrames(uint32_t frameCount) LOCALONLY;
+	void SetTransportSampleRate(uint32_t sampleRateHz) LOCALONLY;
 	virtual void PlaybackComplete(OSAction *action,
 								  IOReturn status) TYPE(IOUSBHostPipe::CompleteAsyncIsochIO);
 
@@ -145,6 +157,7 @@ private:
 	kern_return_t SubmitSyncTransfer(uint32_t index) LOCALONLY;
 	kern_return_t SubmitCaptureTransfer(uint32_t index) LOCALONLY;
 	void FailPlaybackStream(IOReturn status) LOCALONLY;
+	void RecordOutputLatency(uint64_t currentUsbFrame, uint64_t fifoFrames) LOCALONLY;
 	void FinishPlaybackStop() LOCALONLY;
 	kern_return_t StoreCaptureBytes(const uint8_t *bytes, uint32_t byteCount) LOCALONLY;
 	void ReleaseCaptureResources() LOCALONLY;

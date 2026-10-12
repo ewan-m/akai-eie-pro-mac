@@ -59,9 +59,14 @@ namespace akai_eie
 	std::uint32_t CalculatePlaybackFramesWanted(std::uint32_t sample_rate,
 												PlaybackTimingState &state, std::uint32_t feedback_frames = 0) noexcept;
 
-	constexpr bool IsReasonableSyncFeedback(std::uint8_t frames_elapsed) noexcept
+	// Sync reports carry device frames per 1 ms. The upper bound scales the
+	// original 48 kHz limit of 50 to the active rate (rounding up so 44.1 kHz
+	// still accepts its 45-frame reports).
+	constexpr bool IsReasonableSyncFeedback(std::uint32_t frames_elapsed,
+											std::uint32_t sample_rate) noexcept
 	{
-		return frames_elapsed > 0 && frames_elapsed < 50;
+		return frames_elapsed > 0 &&
+			   frames_elapsed < (sample_rate * 50u + 47999u) / 48000u;
 	}
 
 	struct IsoPacket

@@ -24,11 +24,14 @@ DEXT_BUNDLE := $(BUILD_DIR)/$(DEXT_BUNDLE_ID).dext
 APP_BUNDLE := $(BUILD_DIR)/AkaiEieActivator.app
 DEXT_EXECUTABLE := $(GEN_BIN_DIR)/$(DEXT_EXECUTABLE_NAME)
 
-CXXFLAGS := -std=c++17 -fblocks -target $(TRIPLE) -isysroot $(SDKROOT) \
+# Without an explicit level clang builds at -O0, which leaves the per-sample
+# encode/decode loops on the real-time audio path unoptimised.
+OPTFLAGS ?= -O2
+CXXFLAGS := -std=c++17 -fblocks $(OPTFLAGS) -target $(TRIPLE) -isysroot $(SDKROOT) \
 	-I$(GEN_FRAMEWORK_DIR) -I$(GEN_DIR) -I$(SOURCE_DIR) -I..
 LDFLAGS := -target $(TRIPLE) -isysroot $(SDKROOT) \
 	-framework DriverKit -framework AudioDriverKit -framework USBDriverKit
-SWIFTFLAGS := -target $(MACOS_TRIPLE) -sdk $(MACOSX_SDKROOT) \
+SWIFTFLAGS := -O -target $(MACOS_TRIPLE) -sdk $(MACOSX_SDKROOT) \
 	-module-cache-path $(SWIFT_MODULE_CACHE) \
 	-framework Cocoa -framework SystemExtensions
 IIGFLAGS := --framework-name $(FRAMEWORK_NAME) \

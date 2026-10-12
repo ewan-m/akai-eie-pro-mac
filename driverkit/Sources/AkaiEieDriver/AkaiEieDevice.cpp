@@ -72,14 +72,24 @@ bool AkaiEieDevice::init(IOUserAudioDriver *driver,
 	ApplyRateLatencies(akai_eie_driver::kDefaultSampleRateHz);
 	(void)SetPreferredChannelsForStereo(1, 2);
 
-	IOUserAudioChannelLabel labels[akai_eie_driver::kChannelCount] = {
+	// Inputs are four independent mic/line channels.
+	IOUserAudioChannelLabel inputLabels[akai_eie_driver::kChannelCount] = {
 		IOUserAudioChannelLabel::Discrete_0,
 		IOUserAudioChannelLabel::Discrete_1,
 		IOUserAudioChannelLabel::Discrete_2,
 		IOUserAudioChannelLabel::Discrete_3,
 	};
-	(void)SetPreferredInputChannelLayout(labels, akai_eie_driver::kChannelCount);
-	(void)SetPreferredOutputChannelLayout(labels, akai_eie_driver::kChannelCount);
+	// Outputs 1-2 are the main stereo pair. Labelling them Left/Right lets
+	// CoreAudio spread mono sources across both sides; with all-discrete labels
+	// it has no stereo pair to map onto and sends mono to output 1 only.
+	IOUserAudioChannelLabel outputLabels[akai_eie_driver::kChannelCount] = {
+		IOUserAudioChannelLabel::Left,
+		IOUserAudioChannelLabel::Right,
+		IOUserAudioChannelLabel::Discrete_2,
+		IOUserAudioChannelLabel::Discrete_3,
+	};
+	(void)SetPreferredInputChannelLayout(inputLabels, akai_eie_driver::kChannelCount);
+	(void)SetPreferredOutputChannelLayout(outputLabels, akai_eie_driver::kChannelCount);
 
 	ret = ConfigureStreams(driver);
 	if (ret != kIOReturnSuccess)
